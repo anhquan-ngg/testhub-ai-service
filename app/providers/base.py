@@ -1,0 +1,23 @@
+"""Provider contract and sanitized error types."""
+
+from typing import Protocol
+
+from app.errors import ServiceError
+
+
+class ProviderError(ServiceError):
+    """An upstream model call failed without exposing its request or key."""
+
+
+class ProviderTimeoutError(ProviderError):
+    """An upstream model call exceeded its configured timeout."""
+
+
+class QuestionProvider(Protocol):
+    async def generate(self, prompt: str) -> str:
+        """Generate a JSON string from the given prompt."""
+        ...
+
+    async def aclose(self) -> None:
+        """Release resources when the application shuts down."""
+        ...
