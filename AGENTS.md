@@ -11,7 +11,7 @@ Hướng dẫn cho AI coding agent làm việc trong repo này. Đọc `README.m
 
 ## 2. Vai trò của service và ranh giới trách nhiệm
 
-Kiến trúc mục tiêu là **Next.js → NestJS → Python FastAPI → LLM/RAG**. MVP hiện có API nội bộ FastAPI nhưng chưa được NestJS tích hợp; frontend không gọi service trực tiếp trong kiến trúc dự kiến.
+Kiến trúc mục tiêu là **Next.js → NestJS → Python FastAPI → LLM/RAG**. MVP có API nội bộ FastAPI và client NestJS ở `../testhub-v2-backend/src/question-generation/`. Client/contract đã hiện thực; batch API, worker và giao diện vẫn là bước tiếp theo. Frontend không gọi service trực tiếp.
 
 | Thành phần | Trách nhiệm |
 | --- | --- |
@@ -70,7 +70,7 @@ testhub-ai-service/
 3. **Ingestion RAG:** NestJS kiểm tra quyền và lưu file trên S3/MinIO; AI service trích xuất PDF/DOCX/PPTX, giữ trang/slide, chia chunks, tạo embeddings, lưu vào `rag`. Chỉ đánh dấu tài liệu `READY` sau khi xử lý xong.
 4. **Generation RAG:** Truy xuất chunks trong danh sách tài liệu được phép, phân bổ nguồn để bao phủ nhiều mục kiến thức, sinh câu hỏi kèm tham chiếu nguồn; NestJS kiểm duyệt và chỉ lưu câu được duyệt.
 
-Contract batch, cách chuyển file và schema dữ liệu cần được thống nhất với `../testhub-v2-backend` trước khi viết phần tích hợp. `POST /internal/generate` đã tồn tại trong repo này nhưng chưa có client NestJS.
+Contract văn bản `text-generation.v1` đã thống nhất qua `contracts/text-generation.v1.json` và fixture tương ứng ở NestJS. Backend dùng `X-Internal-Token`, deadline mặc định 35000 ms và một HTTP invocation; Python giữ deadline 30000 ms/retry SDK. `AI_SERVICE_INTERNAL_TOKEN` của NestJS phải trùng `INTERNAL_API_TOKEN`, dùng 32–256 ký tự ASCII nhìn thấy được để tương thích HTTP header. Batch/persistence, chuyển file và schema RAG chưa triển khai. Đối chiếu `../testhub-v2-backend/docs/ai-question-generation.md` khi đổi contract; cập nhật cả hai fixture và type frontend.
 
 ## 5. Quy ước khi triển khai
 

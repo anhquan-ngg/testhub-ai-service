@@ -61,7 +61,7 @@ Ví dụ kết quả:
 }
 ```
 
-`question_text`, `options`, `question_type`, `question_format` và `correct_answer` khớp bản nháp từ prototype `../testhub-v2-backend/src/questions/ai-question-generation.service.ts`. Service kiểm tra số câu, bốn lựa chọn khác nhau, đúng một đáp án, độ dài và câu hỏi trùng. Việc kiểm chứng nội dung với tài liệu và duyệt cuối vẫn thuộc giảng viên/backend.
+`question_text`, `options`, `question_type`, `question_format` và `correct_answer` dùng các tên trường của ngân hàng câu hỏi TestHub; khi tích hợp NestJS cần chuyển mảng `options` thành chuỗi JSON theo schema backend. Prototype gọi Gemini trong backend đã được gỡ; Python service là nơi thực hiện sinh câu hỏi. Service kiểm tra số câu, bốn lựa chọn khác nhau, đúng một đáp án, độ dài và câu hỏi trùng. Việc kiểm chứng nội dung với tài liệu và duyệt cuối vẫn thuộc giảng viên/backend.
 
 Mã lỗi chính: `401` token thiếu/sai; `422` request sai; `503` thiếu cấu hình hoặc hết năng lực xử lý; `502` Gemini lỗi hoặc JSON không hợp lệ; `504` Gemini timeout. Nội dung lỗi upstream không chứa API key, prompt hay đoạn văn bản.
 
@@ -88,6 +88,16 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:8000/internal/generate' -Method Post -C
 ```
 
 ## Kiểm thử
+
+Contract tích hợp NestJS được cố định ở `contracts/text-generation.v1.json`;
+`tests/test_nestjs_contract.py` kiểm tra fixture qua FastAPI thật với provider giả.
+Backend đã có client và service kiểm tra quyền tại
+`../testhub-v2-backend/src/question-generation/`. Xem
+[hướng dẫn tích hợp](https://github.com/anhquan-ngg/testhub-v2-backend/blob/master/docs/ai-question-generation.md) để cấu hình
+`AI_SERVICE_INTERNAL_TOKEN` khớp `INTERNAL_API_TOKEN` và chạy test HTTP liên repo.
+Token cho client Node dùng 32–256 ký tự ASCII nhìn thấy được; deadline NestJS mặc
+định 35 giây, lớn hơn deadline Python 30 giây. API lô, hàng đợi và giao diện duyệt
+chưa được triển khai.
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
