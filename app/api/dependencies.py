@@ -7,6 +7,7 @@ from fastapi import Header, HTTPException, Request
 from app.config import Settings
 from app.errors import ServiceUnavailableError
 from app.services.question_generator import QuestionGenerator
+from app.services.rag_errors import RagError
 
 
 def require_internal_token(
@@ -15,10 +16,14 @@ def require_internal_token(
     """Compare encoded bytes so non-ASCII input cannot cause a TypeError."""
     settings: Settings = request.app.state.settings
     if not settings.internal_api_token:
+        if request.url.path.startswith("/internal/rag/"):
+            raise RagError("RAG_AUTH_UNAVAILABLE", 503)
         raise HTTPException(503, "Internal token not configured")
     if not x_internal_token or not secrets.compare_digest(
         x_internal_token.encode("utf-8"), settings.internal_api_token.encode("utf-8"),
     ):
+        if request.url.path.startswith("/internal/rag/"):
+            raise RagError("RAG_UNAUTHORIZED", 401)
         raise HTTPException(401, "Unauthorized")
 
 

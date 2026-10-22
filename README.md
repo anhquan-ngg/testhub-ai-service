@@ -1,15 +1,87 @@
 # testhub-ai-service
 
-FastAPI nội bộ sinh câu hỏi trắc nghiệm từ đoạn văn bản bằng Gemini, **không dùng RAG**. API trả bản nháp JSON để backend TestHub kiểm duyệt và lưu sau; service này không ghi database.
+## Grounded document question generation (2026-10-23)
+
+- POST /internal/rag/generate implements rag-generation.v1, authenticated with the
+  existing token. GroundedGeneration retrieves authorized READY chunks, shares
+  QuestionGenerator admission/provider/deadline and rechecks full scope afterward.
+- GeminiProvider.generate_grounded uses a separate structured response schema;
+  text-generation.v1 stays unchanged. Validate exact count, distinct questions,
+  four options/one answer, known chunk IDs and exact nonblank evidence quotes.
+- Citations include original source chunks/positions/hashes. UNASSESSED is explicit:
+  quote matching does not establish answer entailment, factual accuracy or full-file
+  coverage. Never fabricate citations or fall back to general knowledge.
+- Total grounded deadline 75s; NestJS uses 85s. Generation shares the existing
+  semaphore/client and bounded SDK retries. No Python bank/business writes.
+- Export contracts/rag-indexing.openapi.json after route/schema changes. Tests use
+  synthetic providers or real SDK HTTP against local Postman fixtures, never real
+  keys/documents. Backend/Next.js now accept attached PDFs/PPTX and retain evidence
+  through review/edit/commit. See ../testhub-v2-backend/docs/rag-indexing.md section 4.
+
+## Current RAG implementation (2026-10-21)
+
+- Chunking, Google embedding and scoped retrieval are implemented. This supersedes
+  the earlier extraction-only snapshots below. Grounded generation is implemented; OCR, hybrid/reranking and additional
+  providers remain future work.
+- `api/rag.py`, `schemas/rag.py`, `services/chunking.py`, `embedding.py`,
+  `retrieval.py`, `repositories/vector_repository.py` own the internal contract.
+  NestJS authorizes business scope and orchestrates checkpointed BullMQ work.
+- Use the same PostgreSQL DB with dedicated `testhub_ai` role/schema `rag`.
+  Migrations in migrations/ are manual operator setup, never applied at startup.
+  RAG_ENABLED defaults false; RAG_DATABASE_URL is private. GEMINI_API_KEY is reused.
+- Fixed profile: gemini-embedding-001, 768 dimensions, explicit document/query tasks,
+  L2 normalization; deterministic byte-budgeted source chunks and codepoint offsets.
+  Never silently change model/dimensions/profile or reset paid-call budgets.
+- Only READY owner/profile/index scopes are searchable. Keep full-scope pre/post
+  checks, SQL filters, tombstones and fenced leases. Python never writes bank data.
+- On Windows, preserve the Proactor main loop for parser subprocesses; the psycopg
+  pool runs on an owned selector-loop thread. Readiness checks DB schema, not Google.
+- Setup/API/limits: [backend RAG guide](../testhub-v2-backend/docs/rag-indexing.md).
+  Contract: contracts/rag-indexing.openapi.json; regenerate via
+  `python scripts/export_rag_contract.py`. Run pytest and opt-in SDK HTTP simulation;
+  real pgvector tests require isolated RAG_TEST_DATABASE_URL, never RAG_DATABASE_URL.
+
+FastAPI nội bộ sinh câu hỏi từ văn bản, trích xuất PDF/PPTX, chia chunks, tạo
+embedding Google và truy xuất ngữ cảnh. Python chỉ ghi schema `rag`; NestJS sở hữu
+dữ liệu nghiệp vụ và ngân hàng câu hỏi. Python không giữ credential S3.
+
+## Trích xuất PDF/PPTX (2026-10-21)
+
+`POST /internal/documents/extract?source_type=PDF&include_notes=false` nhận bytes
+`application/octet-stream`, xác thực `X-Internal-Token`. Không cần key Gemini,
+không gửi nội dung sang nhà cung cấp AI. `include_notes=true` chỉ dành cho PPTX
+và cần giảng viên chọn. Contract:
+[`document-extraction.openapi.json`](contracts/document-extraction.openapi.json).
+
+- Tối đa 20 MiB, 500 trang/slide, 1 triệu ký tự; giữ vị trí từ 1.
+- Kết quả `document-extraction.v1`: hash nguồn, loại file, tùy chọn notes,
+  `unit_count`, `spans[{kind,position,text}]`, warnings và trạng thái.
+- `EXTRACTED` là đã lấy text; `OCR_REQUIRED` là nguồn thiếu text/có trang ảnh
+  không lấy được text. Không đánh dấu index READY ở giai đoạn này.
+- pypdf/python-pptx chạy trong process con. ZIP được đọc theo ngân sách giải nén
+  thực tế rồi repack trước parser. Không chạy nội dung nhúng hoặc fetch URL.
+- Deadline 45s; tối đa 2 request/process, chờ slot 100ms. Hủy/quá hạn sẽ kill và
+  await process con. Trên Linux/POSIX: thêm cap 768 MiB virtual memory, 40s CPU,
+  output 8 MiB. Windows local chưa có OS memory cap tương đương; production dùng
+  Linux container với resource limits. Dockerfile không chứng minh đã deploy thật.
+- Lỗi: 401 token, 413 quá cỡ, 415 media type, 422 file/cấu hình sai, 503 hết năng
+  lực/infra, 504 deadline. Không lộ source, mật khẩu file hay traceback parser.
+
+Backend chạy `npm run start:document-worker` riêng sau khi áp migration local và
+build. UI: `/{locale}/lecturer/questions/documents`. Xem
+[hướng dẫn cả luồng](../testhub-v2-backend/docs/learning-documents.md).
+Cập nhật `.venv` hiện có bằng
+`.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt`; không chép đè `.env`.
 
 ## Chạy local
 
-Yêu cầu **Python 3.12** và Gemini API key. Dockerfile cũng dùng `python:3.12-slim`. Trong PowerShell, tại thư mục repo, kiểm tra `python --version` hiển thị `Python 3.12.x` rồi tạo môi trường:
+Yêu cầu **Python 3.12**; Gemini API key dùng cho sinh câu hỏi và embedding. Dockerfile dùng
+`python:3.12-slim`. Trong PowerShell, tại repo, kiểm tra `python --version` rồi tạo môi trường:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-Copy-Item .env.example .env
+if (!(Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
 Nếu `.venv` đã được tạo bằng phiên bản Python khác, hãy tạo lại bằng Python 3.12 trước khi cài dependency.
@@ -96,8 +168,9 @@ Backend đã có client và service kiểm tra quyền tại
 [hướng dẫn tích hợp](https://github.com/anhquan-ngg/testhub-v2-backend/blob/master/docs/ai-question-generation.md) để cấu hình
 `AI_SERVICE_INTERNAL_TOKEN` khớp `INTERNAL_API_TOKEN` và chạy test HTTP liên repo.
 Token cho client Node dùng 32–256 ký tự ASCII nhìn thấy được; deadline NestJS mặc
-định 35 giây, lớn hơn deadline Python 30 giây. API lô, hàng đợi và giao diện duyệt
-chưa được triển khai.
+định 35 giây, lớn hơn deadline Python 30 giây cho sinh câu từ văn bản. NestJS và
+frontend đã có batch/worker/staging, sửa/duyệt và commit. Trích xuất tài liệu dùng
+deadline riêng (Python 45s, NestJS mặc định 55s).
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
@@ -112,10 +185,15 @@ app/
 ├── main.py
 ├── config.py
 ├── errors.py
-├── api/{generation,dependencies,errors}.py
+├── api/{generation,documents,rag,dependencies,errors}.py
 ├── providers/{base,gemini}.py
-├── schemas/question.py
-└── services/{prompt_builder,question_generator}.py
+├── schemas/{question,document,rag,grounded_generation}.py
+├── services/{prompt_builder,question_generator,document_parser,document_parser_worker}.py
+├── services/{chunking,embedding,retrieval,rag_errors,grounded_generation}.py
+└── repositories/{vector_repository,windows_pool}.py
+migrations/{000_bootstrap,001_rag}.sql
+contracts/{text-generation.v1,document-extraction.openapi,rag-indexing.openapi}.json
+scripts/{export_document_contract,export_rag_contract}.py
 tests/
 requirements.txt
 requirements-dev.txt
@@ -123,4 +201,7 @@ Dockerfile
 .env.example
 ```
 
-Thiết kế lâu dài trong [AGENTS.md](AGENTS.md) gồm `api/documents.py`, parser, chunking, embedding, retrieval, pgvector và provider khác. Các phần đó **chưa được triển khai**. Sơ đồ mục tiêu là Next.js → NestJS/BullMQ → FastAPI → Gemini; NestJS giữ quyền truy cập, batch, bản nháp và quy trình duyệt. Xem [CONTINUITY.md](CONTINUITY.md) để biết trạng thái bàn giao mới nhất.
+Parser PDF/PPTX, chunking, Google embedding, pgvector, retrieval và sinh câu RAG có
+trích dẫn đã được triển khai. OCR và provider khác vẫn là bước sau. NestJS
+giữ quyền truy cập, metadata, batch, bản nháp và duyệt/commit. Xem
+[CONTINUITY.md](CONTINUITY.md) và hướng dẫn backend cho trạng thái/lệnh chạy.

@@ -1,0 +1,1 @@
+"""AI-owned technical persistence."""

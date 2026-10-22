@@ -18,6 +18,10 @@ class QuestionProvider(Protocol):
         """Generate a JSON string from the given prompt."""
         ...
 
+    async def generate_grounded(self, prompt: str) -> str:
+        """Generate grounded JSON including evidence citations."""
+        ...
+
     async def aclose(self) -> None:
         """Release resources when the application shuts down."""
         ...
