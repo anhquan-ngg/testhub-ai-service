@@ -1,12 +1,11 @@
 """rag-generation.v1: validated source evidence accompanies every generated draft."""
 from typing import Literal, Self
 from pydantic import BaseModel, Field, model_validator
-from app.schemas.question import RawQuestion, RawQuestionList, GeneratedQuestion, QuestionFormat, GeminiQuestion
+from app.schemas.question import RawQuestion, RawQuestionList, GeneratedQuestion, QuestionBlueprint, GeminiQuestion
 from app.schemas.rag import RetrieveRequest, RetrievedChunk, Uuid, StrictModel, Hash
 
-class GroundedGenerateRequest(RetrieveRequest):
-    question_format: QuestionFormat = Field(strict=False)
-    count: int = Field(ge=1, le=20)
+class GroundedGenerateRequest(RetrieveRequest, QuestionBlueprint):
+    """Retrieval scope plus legacy question_format/count or ordered question_configs."""
 
 class RawCitation(StrictModel):
     chunk_id: Uuid

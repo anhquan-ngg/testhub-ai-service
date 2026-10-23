@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import unicodedata
 
 from pydantic import ValidationError
 
@@ -11,7 +12,10 @@ from app.schemas.question import (
     GenerateRequest,
     GenerateResponse,
     GeneratedQuestion,
+    QuestionSlot,
+    RawQuestion,
     RawQuestionList,
+    answers_match,
 )
 from app.services.prompt_builder import build_prompt
 from app.schemas.grounded_generation import GroundedGenerateRequest, GroundedGenerateResponse
@@ -22,6 +26,51 @@ logger = logging.getLogger(__name__)
 
 class InvalidQuestionsError(ServiceError):
     """The provider returned JSON that cannot be accepted as question drafts."""
+
+
+def _comparable(text: str) -> tuple[str, list[int]]:
+    """NFD-decompose per character and collapse whitespace, mapping back to source indexes."""
+    chars: list[str] = []
+    origins: list[int] = []
+    for index, char in enumerate(text):
+        if char.isspace():
+            if chars and chars[-1] != " ":
+                chars.append(" ")
+                origins.append(index)
+            continue
+        for part in unicodedata.normalize("NFD", char):
+            chars.append(part)
+            origins.append(index)
+    return "".join(chars), origins
+
+
+def locate_quote(quote: str, text: str) -> str | None:
+    """Return the exact source span matching a quote despite whitespace/Unicode form drift."""
+    if quote.strip() and quote in text:
+        return quote
+    needle = _comparable(quote)[0].strip()
+    haystack, origins = _comparable(text)
+    start = haystack.find(needle) if needle else -1
+    if start < 0:
+        return None
+    end = start + len(needle) - 1
+    # Reject matches that start or end inside a decomposed source character (e.g. "a" of "á").
+    if (start > 0 and origins[start - 1] == origins[start]) or (
+        end + 1 < len(origins) and origins[end + 1] == origins[end]
+    ):
+        return None
+    return text[origins[start]:origins[end] + 1]
+
+
+def check_slots(questions: list[RawQuestion], slots: list[QuestionSlot]) -> None:
+    """Require one question per requested slot with that slot's correct-option rule."""
+    if len(questions) != len(slots):
+        logger.warning("generation_invalid_output reason=count")
+        raise InvalidQuestionsError("Gemini returned the wrong question count")
+    if not all(answers_match(slot.question_type, question.options)
+               for question, slot in zip(questions, slots)):
+        logger.warning("generation_invalid_output reason=answers")
+        raise InvalidQuestionsError("Gemini returned answers that do not match the question type")
 
 
 class QuestionGenerator:
@@ -60,19 +109,20 @@ class QuestionGenerator:
         except ValidationError:
             logger.warning("generation_invalid_output reason=schema")
             raise InvalidQuestionsError("Gemini returned invalid question JSON") from None
-        if len(parsed.questions) != request.count:
-            logger.warning("generation_invalid_output reason=count")
-            raise InvalidQuestionsError("Gemini returned the wrong question count")
-        # Source fields have already passed RawQuestionList validation, and the
-        # format comes from a validated request. Avoid validating them again.
+        slots = request.slots()
+        check_slots(parsed.questions, slots)
+        # Source fields and answer counts have already been validated, and the
+        # type/format come from a validated request. Avoid validating them again.
         return GenerateResponse.model_construct(
             questions=[
                 GeneratedQuestion.model_construct(
                     question_text=question.question_text,
                     options=question.options,
-                    question_format=request.question_format,
+                    question_type=slot.question_type,
+                    question_format=slot.question_format,
+                    correct_answer=None,
                 )
-                for question in parsed.questions
+                for question, slot in zip(parsed.questions, slots)
             ]
         )
 
@@ -95,22 +145,29 @@ class QuestionGenerator:
             try:
                 parsed=RawGroundedQuestionList.model_validate_json(raw)
             except ValidationError:
+                logger.warning("generation_invalid_output reason=schema")
                 raise InvalidQuestionsError("Invalid grounded questions") from None
-            if len(parsed.questions)!=request.count:
-                raise InvalidQuestionsError("Insufficient grounded questions")
+            slots=request.slots()
+            check_slots(parsed.questions,slots)
             by_id={c.chunk_id:c for c in context.chunks}
             questions=[]
-            for question in parsed.questions:
+            for question,slot in zip(parsed.questions,slots):
                 citations=[]
                 if len({c.chunk_id for c in question.citations})!=len(question.citations):
+                    logger.warning("generation_invalid_output reason=duplicate_citations")
                     raise InvalidQuestionsError("Duplicate citations")
                 for citation in question.citations:
                     chunk=by_id.get(citation.chunk_id)
-                    if chunk is None or not citation.quote.strip() or citation.quote not in chunk.text:
+                    if chunk is None:
+                        logger.warning("generation_invalid_output reason=unknown_chunk")
                         raise InvalidQuestionsError("Unsupported citation evidence")
-                    citations.append(SourceCitation(chunk=chunk,quote=citation.quote))
+                    quote=locate_quote(citation.quote,chunk.text)
+                    if quote is None or len(quote)>600:
+                        logger.warning("generation_invalid_output reason=quote_mismatch")
+                        raise InvalidQuestionsError("Unsupported citation evidence")
+                    citations.append(SourceCitation(chunk=chunk,quote=quote))
                 questions.append(GroundedQuestion(question_text=question.question_text,options=question.options,
-                    question_format=request.question_format,citations=citations))
+                    question_type=slot.question_type,question_format=slot.question_format,citations=citations))
             return GroundedGenerateResponse(profile_id=context.profile_id,questions=questions)
         finally:
             self._semaphore.release()

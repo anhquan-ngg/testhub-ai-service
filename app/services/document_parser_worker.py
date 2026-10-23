@@ -76,6 +76,8 @@ def extract(path: Path, source_type: str, include_notes: bool) -> ExtractionResu
         from pypdf import PdfReader
         if not data.startswith(b"%PDF-"):
             raise DocumentRejected("DOCUMENT_INVALID")
+        # Reject structural violations reported by pypdf's strict mode; do not
+        # silently repair malformed PDFs even when strict=False could recover them.
         reader = PdfReader(io.BytesIO(data), strict=True)
         if reader.is_encrypted:
             raise DocumentRejected("DOCUMENT_ENCRYPTED")
@@ -90,6 +92,7 @@ def extract(path: Path, source_type: str, include_notes: bool) -> ExtractionResu
                 needs_ocr = True
     elif source_type == "PPTX":
         from pptx import Presentation
+        from pptx.shapes.picture import Picture
         presentation = Presentation(checked_pptx(data))
         count = len(presentation.slides)
         if not 1 <= count <= MAX_UNITS:
@@ -107,7 +110,7 @@ def extract(path: Path, source_type: str, include_notes: bool) -> ExtractionResu
             return parts
 
         def contains_image(shapes: object) -> bool:
-            return any(shape.shape_type == 13 or
+            return any(isinstance(shape, Picture) or
                        (shape.shape_type == 6 and contains_image(shape.shapes))
                        for shape in shapes)
 

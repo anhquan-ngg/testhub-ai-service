@@ -7,17 +7,18 @@
       "mode": "text",
       "text": "Tìm kiếm nhị phân hoạt động trên mảng đã sắp xếp và có độ phức tạp O(log n)."
     },
-    "question_type": "SINGLE_CHOICE",
-    "question_format": "KNOWLEDGE",
-    "count": 1,
+    "question_configs": [
+      { "question_type": "SINGLE_CHOICE", "question_format": "KNOWLEDGE", "count": 1 }
+    ],
     "language": "vi",
     "external_processing_consent": true
   },
   "internal_request": {
     "text": "Tìm kiếm nhị phân hoạt động trên mảng đã sắp xếp và có độ phức tạp O(log n).",
     "topic": "Cấu trúc dữ liệu",
-    "question_format": "KNOWLEDGE",
-    "count": 1
+    "question_configs": [
+      { "question_type": "SINGLE_CHOICE", "question_format": "KNOWLEDGE", "count": 1 }
+    ]
   },
   "internal_response": {
     "questions": [

@@ -90,6 +90,12 @@ class RagBodyLimit:
         if scope["type"] != "http" or not scope.get("path", "").startswith("/internal/rag/"):
             await self.app(scope, receive, send)
             return
+        request = Request(scope)
+        try:
+            require_internal_token(request, request.headers.get("X-Internal-Token"))
+        except RagError as exc:
+            await JSONResponse(status_code=exc.status, content={"detail": {"code": exc.code, "retryable": exc.retryable}})(scope, receive, send)
+            return
         try:
             await asyncio.wait_for(self.slots.acquire(), 0.1)
         except TimeoutError:

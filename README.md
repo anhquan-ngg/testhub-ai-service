@@ -16,7 +16,7 @@
 - Export contracts/rag-indexing.openapi.json after route/schema changes. Tests use
   synthetic providers or real SDK HTTP against local Postman fixtures, never real
   keys/documents. Backend/Next.js now accept attached PDFs/PPTX and retain evidence
-  through review/edit/commit. See ../testhub-v2-backend/docs/rag-indexing.md section 4.
+  through review/edit/commit. See https://github.com/anhquan-ngg/testhub-v2-backend/blob/master/docs/rag-indexing.md section 4.
 
 ## Current RAG implementation (2026-10-21)
 
@@ -34,9 +34,10 @@
   Never silently change model/dimensions/profile or reset paid-call budgets.
 - Only READY owner/profile/index scopes are searchable. Keep full-scope pre/post
   checks, SQL filters, tombstones and fenced leases. Python never writes bank data.
-- On Windows, preserve the Proactor main loop for parser subprocesses; the psycopg
+- On Windows, parser subprocesses use asyncio on Proactor loops and fall back to
+  Popen with waiting in a thread on selector loops; the psycopg
   pool runs on an owned selector-loop thread. Readiness checks DB schema, not Google.
-- Setup/API/limits: [backend RAG guide](../testhub-v2-backend/docs/rag-indexing.md).
+- Setup/API/limits: [backend RAG guide](https://github.com/anhquan-ngg/testhub-v2-backend/blob/master/docs/rag-indexing.md).
   Contract: contracts/rag-indexing.openapi.json; regenerate via
   `python scripts/export_rag_contract.py`. Run pytest and opt-in SDK HTTP simulation;
   real pgvector tests require isolated RAG_TEST_DATABASE_URL, never RAG_DATABASE_URL.
@@ -102,15 +103,17 @@ Header bắt buộc: `X-Internal-Token: <INTERNAL_API_TOKEN>`.
 {
   "text": "Tìm kiếm nhị phân hoạt động trên mảng đã sắp xếp và có độ phức tạp O(log n).",
   "topic": "Cấu trúc dữ liệu",
-  "question_format": "KNOWLEDGE",
-  "count": 1
+  "question_configs": [
+    { "question_type": "SINGLE_CHOICE", "question_format": "KNOWLEDGE", "count": 1 },
+    { "question_type": "MULTIPLE_CHOICE", "question_format": "APPLYING", "count": 1 }
+  ]
 }
 ```
 
 - `text`: 20–20.000 ký tự sau khi bỏ khoảng trắng ở đầu/cuối.
 - `topic`: tùy chọn, tối đa 200 ký tự; chuỗi rỗng hoặc chỉ có khoảng trắng được chuyển thành `null`.
-- `question_format`: `KNOWLEDGE`, `UNDERSTANDING`, `APPLYING` hoặc `ADVANCED`.
-- `count`: số nguyên từ 1 đến 20.
+- `question_configs`: 1–10 dòng `{question_type, question_format, count}`, tổng 1–20 câu. `question_type` là `SINGLE_CHOICE` hoặc `MULTIPLE_CHOICE`; `question_format` là `KNOWLEDGE`, `UNDERSTANDING`, `APPLYING` hoặc `ADVANCED`. Câu được sinh và kiểm tra theo đúng thứ tự các dòng.
+- Tương thích ngược: vẫn nhận dạng cũ `question_format` + `count` (1–20, một đáp án); không được gửi cùng lúc hai dạng. `/internal/rag/generate` dùng cùng quy tắc.
 
 Ví dụ kết quả:
 
@@ -133,7 +136,7 @@ Ví dụ kết quả:
 }
 ```
 
-`question_text`, `options`, `question_type`, `question_format` và `correct_answer` dùng các tên trường của ngân hàng câu hỏi TestHub; khi tích hợp NestJS cần chuyển mảng `options` thành chuỗi JSON theo schema backend. Prototype gọi Gemini trong backend đã được gỡ; Python service là nơi thực hiện sinh câu hỏi. Service kiểm tra số câu, bốn lựa chọn khác nhau, đúng một đáp án, độ dài và câu hỏi trùng. Việc kiểm chứng nội dung với tài liệu và duyệt cuối vẫn thuộc giảng viên/backend.
+`question_text`, `options`, `question_type`, `question_format` và `correct_answer` dùng các tên trường của ngân hàng câu hỏi TestHub; khi tích hợp NestJS cần chuyển mảng `options` thành chuỗi JSON theo schema backend. Prototype gọi Gemini trong backend đã được gỡ; Python service là nơi thực hiện sinh câu hỏi. Service kiểm tra số câu, bốn lựa chọn khác nhau, số đáp án đúng theo loại câu ở từng vị trí (`SINGLE_CHOICE` đúng 1, `MULTIPLE_CHOICE` 2–3), độ dài và câu hỏi trùng. Việc kiểm chứng nội dung với tài liệu và duyệt cuối vẫn thuộc giảng viên/backend.
 
 Mã lỗi chính: `401` token thiếu/sai; `422` request sai; `503` thiếu cấu hình hoặc hết năng lực xử lý; `502` Gemini lỗi hoặc JSON không hợp lệ; `504` Gemini timeout. Nội dung lỗi upstream không chứa API key, prompt hay đoạn văn bản.
 
@@ -155,7 +158,7 @@ Log lỗi Gemini chỉ ghi giai đoạn, tên loại exception và mã HTTP nế
 Ví dụ gọi local trong PowerShell (chạy sau khi cấu hình `.env`):
 
 ```powershell
-$body = @{ text = 'Tìm kiếm nhị phân hoạt động trên mảng đã sắp xếp và có độ phức tạp O(log n).'; topic = 'Cấu trúc dữ liệu'; question_format = 'KNOWLEDGE'; count = 1 } | ConvertTo-Json
+$body = @{ text = 'Tìm kiếm nhị phân hoạt động trên mảng đã sắp xếp và có độ phức tạp O(log n).'; topic = 'Cấu trúc dữ liệu'; question_configs = @(@{ question_type = 'SINGLE_CHOICE'; question_format = 'KNOWLEDGE'; count = 1 }) } | ConvertTo-Json -Depth 4
 Invoke-RestMethod -Uri 'http://127.0.0.1:8000/internal/generate' -Method Post -ContentType 'application/json' -Headers @{ 'X-Internal-Token' = '<giá trị INTERNAL_API_TOKEN của bạn>' } -Body $body
 ```
 

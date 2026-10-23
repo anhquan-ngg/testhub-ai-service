@@ -1,5 +1,17 @@
 # AGENTS.md — testhub-ai-service
 
+## Question configs for generation (2026-10-23)
+
+- GenerateRequest and GroundedGenerateRequest share QuestionBlueprint: either
+  ordered question_configs [{question_type, question_format, count}] (1-10 rows,
+  total <=20, SINGLE_CHOICE|MULTIPLE_CHOICE) or the legacy question_format+count
+  (single choice). Both forms together are rejected; use request.slots().
+- Prompts list one slot per question; check_slots validates count and the
+  correct-option rule per position (single: exactly 1; multiple: 2-3 of 4).
+  Output type/format come from the slot, never from the model.
+- Both text-generation.v1 fixtures now use question_configs; keep them identical.
+  RAG OpenAPI was regenerated. ESSAY generation is not supported.
+
 ## Grounded document question generation (2026-10-23)
 
 - POST /internal/rag/generate implements rag-generation.v1, authenticated with the
@@ -16,14 +28,16 @@
 - Export contracts/rag-indexing.openapi.json after route/schema changes. Tests use
   synthetic providers or real SDK HTTP against local Postman fixtures, never real
   keys/documents. Backend/Next.js now accept attached PDFs/PPTX and retain evidence
-  through review/edit/commit. See ../testhub-v2-backend/docs/rag-indexing.md section 4.
+  through review/edit/commit. See https://github.com/anhquan-ngg/testhub-v2-backend/blob/master/docs/rag-indexing.md section 4.
 - RAG errors, including token failures and validation 422, use
   detail: {code, retryable}; declare the common model in route responses.
+  Authenticate before reading a RAG body or acquiring an intake slot.
   Body intake slots are released before downstream processing. Post-LLM scope
   verification bypasses RAG admission and has a separate 5-second deadline.
 - Parser subprocesses receive only PYTHONUTF8 and the OS/temp variables needed
-  for startup; never inherit provider keys, DB URLs or PYTHONPATH. Unsupported
-  subprocess loops fail with DOCUMENT_PROCESS_FAILED/503 and a safe log code.
+  for startup; never inherit provider keys, DB URLs or PYTHONPATH. Loops without
+  subprocess support (uvicorn --reload on Windows uses SelectorEventLoop) fall
+  back to subprocess.Popen waited in a thread, still killed on deadline/cancel.
 
 ## Current RAG implementation (2026-10-21)
 
@@ -41,9 +55,9 @@
   Never silently change model/dimensions/profile or reset paid-call budgets.
 - Only READY owner/profile/index scopes are searchable. Keep full-scope pre/post
   checks, SQL filters, tombstones and fenced leases. Python never writes bank data.
-- On Windows, preserve the Proactor main loop for parser subprocesses; the psycopg
-  pool runs on an owned selector-loop thread. Readiness checks DB schema, not Google.
-- Setup/API/limits: [backend RAG guide](../testhub-v2-backend/docs/rag-indexing.md).
+- On Windows, parser subprocesses use asyncio on Proactor loops and the threaded
+  Popen fallback on selector loops; the psycopg pool runs on an owned selector-loop thread. Readiness checks DB schema, not Google.
+- Setup/API/limits: [backend RAG guide](https://github.com/anhquan-ngg/testhub-v2-backend/blob/master/docs/rag-indexing.md).
   Contract: contracts/rag-indexing.openapi.json; regenerate via
   `python scripts/export_rag_contract.py`. Run pytest and opt-in SDK HTTP simulation;
   real pgvector tests require isolated RAG_TEST_DATABASE_URL, never RAG_DATABASE_URL.
@@ -61,8 +75,8 @@
   limits are implemented; Windows lacks equivalent memory isolation. Keep source
   data and third-party stderr out of logs.
 - Preserve PAGE/SLIDE/NOTES, original hash and notes opt-in. Empty sources/image-only
-  units require OCR_REQUIRED. EXTRACTED is not READY for RAG. OCR/chunking/embedding,
-  vector storage and retrieval remain future work; do not add placeholder modules.
+  units require OCR_REQUIRED. EXTRACTED is not READY for RAG. OCR remains future
+  work; do not add placeholder modules.
 - pypdf/python-pptx are runtime dependencies on Python 3.12. Update extraction
   OpenAPI on contract changes; run real parser/text regression tests and opt-in
   NestJS→FastAPI PDF/PPTX tests. See backend `docs/learning-documents.md`.
@@ -150,8 +164,8 @@ Contract văn bản `text-generation.v1` đã thống nhất qua `contracts/text
 - Lifespan sở hữu settings và Gemini client dùng chung cho mỗi process; không đọc env hoặc tạo connection pool cho từng request. Service quản lý semaphore và deadline tổng; API dependencies xử lý token, exception handler tập trung ánh xạ lỗi HTTP.
 - Retry SDK có giới hạn qua `GEMINI_MAX_ATTEMPTS`, nằm trong deadline `GENERATION_TIMEOUT_MS`; timeout phải trả 504 và giải phóng suất xử lý. Log upstream chỉ ghi loại exception/mã HTTP/giai đoạn, không log message hoặc traceback chứa dữ liệu nguồn. Cleanup client không được che lỗi request.
 - `providers/base.py` là contract chung cho các LLM; Gemini là provider đầu tiên. Tách embedding khỏi LLM provider.
-- Kiểm tra cấu trúc và ngữ nghĩa tối thiểu của đầu ra: số câu, loại/mức nhận thức hợp lệ, số phương án, đúng một đáp án cho câu `SINGLE_CHOICE`, câu rỗng/trùng. JSON hợp lệ chưa chứng minh câu hỏi đúng kiến thức; giảng viên vẫn phải duyệt.
-- Sinh câu hỗ trợ **một đáp án**, văn bản qua API cũ và PDF/PPTX qua RAG có trích dẫn.
+- Kiểm tra cấu trúc và ngữ nghĩa tối thiểu của đầu ra: số câu, loại/mức nhận thức hợp lệ, số phương án, đúng một đáp án cho câu `SINGLE_CHOICE` và 2–3 đáp án cho `MULTIPLE_CHOICE` theo từng vị trí cấu hình, câu rỗng/trùng. JSON hợp lệ chưa chứng minh câu hỏi đúng kiến thức; giảng viên vẫn phải duyệt.
+- Sinh câu hỗ trợ **một đáp án và nhiều đáp án** theo `question_configs`, văn bản qua API cũ và PDF/PPTX qua RAG có trích dẫn.
   DOCX, provider khác và OCR là bước sau. Giữ `text-generation.v1` tương thích.
 - Kiểm thử logic thuần và xử lý lỗi bằng provider giả lập; chỉ chạy smoke test API thật khi có key và người dùng yêu cầu. Không gọi API trả phí trong unit test. Xem `requirements-dev.txt` và `tests/`.
 - Không đưa API key, token, tài liệu nhạy cảm hay toàn bộ prompt vào log. Cấu hình lấy từ biến môi trường; `.env.example` chỉ chứa tên biến và giá trị mẫu vô hại. Thêm `.gitignore` trước khi tạo `.env` thật.
