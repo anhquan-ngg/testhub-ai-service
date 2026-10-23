@@ -1,0 +1,219 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "TestHub AI Service",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/internal/documents/extract": {
+      "post": {
+        "tags": [
+          "documents"
+        ],
+        "summary": "Extract Document",
+        "description": "Receive owner-authorized bytes from NestJS and return source-positioned text.",
+        "operationId": "extract_document_internal_documents_extract_post",
+        "parameters": [
+          {
+            "name": "source_type",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "enum": [
+                "PDF",
+                "PPTX"
+              ],
+              "type": "string",
+              "title": "Source Type"
+            }
+          },
+          {
+            "name": "include_notes",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Notes"
+            }
+          },
+          {
+            "name": "x-internal-token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Internal-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExtractionResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Internal token missing or invalid"
+          },
+          "413": {
+            "description": "Actual input byte limit exceeded"
+          },
+          "415": {
+            "description": "application/octet-stream required"
+          },
+          "422": {
+            "description": "Invalid, encrypted, unsupported or excessive document"
+          },
+          "503": {
+            "description": "Capacity reached or processing infrastructure unavailable"
+          },
+          "504": {
+            "description": "Overall extraction deadline exceeded"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ExtractionResult": {
+        "properties": {
+          "contract_version": {
+            "type": "string",
+            "const": "document-extraction.v1",
+            "title": "Contract Version",
+            "default": "document-extraction.v1"
+          },
+          "source_type": {
+            "type": "string",
+            "enum": [
+              "PDF",
+              "PPTX"
+            ],
+            "title": "Source Type"
+          },
+          "source_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Source Sha256"
+          },
+          "parser_version": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[a-zA-Z0-9./;:_-]+$",
+            "title": "Parser Version"
+          },
+          "include_notes": {
+            "type": "boolean",
+            "title": "Include Notes"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "EXTRACTED",
+              "OCR_REQUIRED"
+            ],
+            "title": "Status"
+          },
+          "unit_count": {
+            "type": "integer",
+            "maximum": 500.0,
+            "minimum": 1.0,
+            "title": "Unit Count"
+          },
+          "spans": {
+            "items": {
+              "$ref": "#/components/schemas/SourceSpan"
+            },
+            "type": "array",
+            "maxItems": 1000,
+            "minItems": 1,
+            "title": "Spans"
+          },
+          "warnings": {
+            "items": {
+              "type": "string",
+              "enum": [
+                "EMPTY_UNITS",
+                "OCR_REQUIRED"
+              ]
+            },
+            "type": "array",
+            "maxItems": 2,
+            "title": "Warnings"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "source_type",
+          "source_sha256",
+          "parser_version",
+          "include_notes",
+          "status",
+          "unit_count",
+          "spans",
+          "warnings"
+        ],
+        "title": "ExtractionResult"
+      },
+      "SourceSpan": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "PAGE",
+              "SLIDE",
+              "NOTES"
+            ],
+            "title": "Kind"
+          },
+          "position": {
+            "type": "integer",
+            "maximum": 500.0,
+            "minimum": 1.0,
+            "title": "Position"
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 1000000,
+            "title": "Text"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "position",
+          "text"
+        ],
+        "title": "SourceSpan"
+      }
+    }
+  }
+}

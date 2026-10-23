@@ -1,0 +1,1523 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "TestHub AI Service",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/internal/rag/generate": {
+      "post": {
+        "tags": [
+          "rag"
+        ],
+        "summary": "Generate",
+        "description": "Generate evidence-cited questions from fully scoped READY indexes.",
+        "operationId": "generate_internal_rag_generate_post",
+        "parameters": [
+          {
+            "name": "x-internal-token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Internal-Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GroundedGenerateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroundedGenerateResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Internal token missing or invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Authorized source scope unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "Request body intake timed out",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Profile, index or lease conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Actual request body byte limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid input, source or insufficient context",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Invalid provider output or provider configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Capacity, authentication configuration, storage or provider unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "RAG or generation deadline exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/rag/profile": {
+      "get": {
+        "tags": [
+          "rag"
+        ],
+        "summary": "Profile",
+        "description": "Expose the immutable current profile without a paid provider call.",
+        "operationId": "profile_internal_rag_profile_get",
+        "parameters": [
+          {
+            "name": "x-internal-token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Internal-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IndexProfile"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Internal token missing or invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Authorized source scope unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "Request body intake timed out",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Profile, index or lease conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Actual request body byte limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid input, source or insufficient context",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Invalid provider output or provider configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Capacity, authentication configuration, storage or provider unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "RAG or generation deadline exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/rag/prepare": {
+      "post": {
+        "tags": [
+          "rag"
+        ],
+        "summary": "Prepare",
+        "description": "Validate source and create a replayable chunk manifest.",
+        "operationId": "prepare_internal_rag_prepare_post",
+        "parameters": [
+          {
+            "name": "x-internal-token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Internal-Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrepareIndexRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IndexProgress"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Internal token missing or invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Authorized source scope unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "Request body intake timed out",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Profile, index or lease conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Actual request body byte limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid input, source or insufficient context",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Invalid provider output or provider configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Capacity, authentication configuration, storage or provider unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "RAG or generation deadline exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/rag/step": {
+      "post": {
+        "tags": [
+          "rag"
+        ],
+        "summary": "Step",
+        "description": "Embed at most one bounded batch and checkpoint its vectors.",
+        "operationId": "step_internal_rag_step_post",
+        "parameters": [
+          {
+            "name": "x-internal-token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Internal-Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IndexCommand"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IndexProgress"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Internal token missing or invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Authorized source scope unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "Request body intake timed out",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Profile, index or lease conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Actual request body byte limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid input, source or insufficient context",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Invalid provider output or provider configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Capacity, authentication configuration, storage or provider unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "RAG or generation deadline exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/rag/retrieve": {
+      "post": {
+        "tags": [
+          "rag"
+        ],
+        "summary": "Retrieve",
+        "description": "Retrieve only READY indexes in the authorized owner/profile/id scope.",
+        "operationId": "retrieve_internal_rag_retrieve_post",
+        "parameters": [
+          {
+            "name": "x-internal-token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Internal-Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetrieveRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetrieveResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Internal token missing or invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Authorized source scope unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "Request body intake timed out",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Profile, index or lease conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Actual request body byte limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid input, source or insufficient context",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Invalid provider output or provider configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Capacity, authentication configuration, storage or provider unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "RAG or generation deadline exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/rag/revoke": {
+      "post": {
+        "tags": [
+          "rag"
+        ],
+        "summary": "Revoke",
+        "description": "Revoke technical access, including a tombstone for late prepare requests.",
+        "operationId": "revoke_internal_rag_revoke_post",
+        "parameters": [
+          {
+            "name": "x-internal-token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Internal-Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IndexCommand"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Internal token missing or invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Authorized source scope unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "Request body intake timed out",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Profile, index or lease conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Actual request body byte limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid input, source or insufficient context",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Invalid provider output or provider configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Capacity, authentication configuration, storage or provider unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "RAG or generation deadline exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ExtractionResult": {
+        "properties": {
+          "contract_version": {
+            "type": "string",
+            "const": "document-extraction.v1",
+            "title": "Contract Version",
+            "default": "document-extraction.v1"
+          },
+          "source_type": {
+            "type": "string",
+            "enum": [
+              "PDF",
+              "PPTX"
+            ],
+            "title": "Source Type"
+          },
+          "source_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Source Sha256"
+          },
+          "parser_version": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[a-zA-Z0-9./;:_-]+$",
+            "title": "Parser Version"
+          },
+          "include_notes": {
+            "type": "boolean",
+            "title": "Include Notes"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "EXTRACTED",
+              "OCR_REQUIRED"
+            ],
+            "title": "Status"
+          },
+          "unit_count": {
+            "type": "integer",
+            "maximum": 500.0,
+            "minimum": 1.0,
+            "title": "Unit Count"
+          },
+          "spans": {
+            "items": {
+              "$ref": "#/components/schemas/SourceSpan"
+            },
+            "type": "array",
+            "maxItems": 1000,
+            "minItems": 1,
+            "title": "Spans"
+          },
+          "warnings": {
+            "items": {
+              "type": "string",
+              "enum": [
+                "EMPTY_UNITS",
+                "OCR_REQUIRED"
+              ]
+            },
+            "type": "array",
+            "maxItems": 2,
+            "title": "Warnings"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "source_type",
+          "source_sha256",
+          "parser_version",
+          "include_notes",
+          "status",
+          "unit_count",
+          "spans",
+          "warnings"
+        ],
+        "title": "ExtractionResult"
+      },
+      "GroundedGenerateRequest": {
+        "properties": {
+          "owner_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Owner Id"
+          },
+          "profile_id": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Profile Id"
+          },
+          "index_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "maxItems": 10,
+            "minItems": 1,
+            "title": "Index Ids"
+          },
+          "query": {
+            "type": "string",
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Query"
+          },
+          "top_k": {
+            "type": "integer",
+            "maximum": 8.0,
+            "minimum": 1.0,
+            "title": "Top K",
+            "default": 6
+          },
+          "question_format": {
+            "$ref": "#/components/schemas/QuestionFormat"
+          },
+          "count": {
+            "type": "integer",
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Count"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "owner_id",
+          "profile_id",
+          "index_ids",
+          "query",
+          "question_format",
+          "count"
+        ],
+        "title": "GroundedGenerateRequest"
+      },
+      "GroundedGenerateResponse": {
+        "properties": {
+          "contract_version": {
+            "type": "string",
+            "const": "rag-generation.v1",
+            "title": "Contract Version",
+            "default": "rag-generation.v1"
+          },
+          "profile_id": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Profile Id"
+          },
+          "quality_status": {
+            "type": "string",
+            "const": "UNASSESSED",
+            "title": "Quality Status",
+            "default": "UNASSESSED"
+          },
+          "questions": {
+            "items": {
+              "$ref": "#/components/schemas/GroundedQuestion"
+            },
+            "type": "array",
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Questions"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "profile_id",
+          "questions"
+        ],
+        "title": "GroundedGenerateResponse"
+      },
+      "GroundedQuestion": {
+        "properties": {
+          "question_text": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Question Text"
+          },
+          "options": {
+            "items": {
+              "$ref": "#/components/schemas/QuestionOption"
+            },
+            "type": "array",
+            "maxItems": 4,
+            "minItems": 4,
+            "title": "Options"
+          },
+          "question_type": {
+            "type": "string",
+            "const": "SINGLE_CHOICE",
+            "title": "Question Type",
+            "default": "SINGLE_CHOICE"
+          },
+          "question_format": {
+            "$ref": "#/components/schemas/QuestionFormat"
+          },
+          "correct_answer": {
+            "type": "null",
+            "title": "Correct Answer"
+          },
+          "citations": {
+            "items": {
+              "$ref": "#/components/schemas/SourceCitation"
+            },
+            "type": "array",
+            "maxItems": 3,
+            "minItems": 1,
+            "title": "Citations"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "question_text",
+          "options",
+          "question_format",
+          "citations"
+        ],
+        "title": "GroundedQuestion"
+      },
+      "IndexCommand": {
+        "properties": {
+          "index_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Index Id"
+          },
+          "profile_id": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Profile Id"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/IndexScope"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "index_id",
+          "profile_id",
+          "scope"
+        ],
+        "title": "IndexCommand"
+      },
+      "IndexProfile": {
+        "properties": {
+          "profile_id": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Profile Id"
+          },
+          "config": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "object",
+            "title": "Config"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "profile_id",
+          "config"
+        ],
+        "title": "IndexProfile"
+      },
+      "IndexProgress": {
+        "properties": {
+          "index_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Index Id"
+          },
+          "profile_id": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Profile Id"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "BUILDING",
+              "READY",
+              "REVOKED"
+            ],
+            "title": "Status"
+          },
+          "chunk_count": {
+            "type": "integer",
+            "maximum": 5000.0,
+            "minimum": 1.0,
+            "title": "Chunk Count"
+          },
+          "completed_chunks": {
+            "type": "integer",
+            "maximum": 5000.0,
+            "minimum": 0.0,
+            "title": "Completed Chunks"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "index_id",
+          "profile_id",
+          "status",
+          "chunk_count",
+          "completed_chunks"
+        ],
+        "title": "IndexProgress"
+      },
+      "IndexScope": {
+        "properties": {
+          "owner_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Owner Id"
+          },
+          "topic_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Topic Id"
+          },
+          "chapter_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Chapter Id"
+          },
+          "document_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Document Id"
+          },
+          "version_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Version Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "owner_id",
+          "topic_id",
+          "chapter_id",
+          "document_id",
+          "version_id"
+        ],
+        "title": "IndexScope"
+      },
+      "PrepareIndexRequest": {
+        "properties": {
+          "index_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Index Id"
+          },
+          "profile_id": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Profile Id"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/IndexScope"
+          },
+          "extraction": {
+            "$ref": "#/components/schemas/ExtractionResult"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "index_id",
+          "profile_id",
+          "scope",
+          "extraction"
+        ],
+        "title": "PrepareIndexRequest"
+      },
+      "QuestionFormat": {
+        "type": "string",
+        "enum": [
+          "KNOWLEDGE",
+          "UNDERSTANDING",
+          "APPLYING",
+          "ADVANCED"
+        ],
+        "title": "QuestionFormat"
+      },
+      "QuestionOption": {
+        "properties": {
+          "text": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Text"
+          },
+          "isCorrect": {
+            "type": "boolean",
+            "title": "Iscorrect"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "text",
+          "isCorrect"
+        ],
+        "title": "QuestionOption"
+      },
+      "RagErrorDetail": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "retryable": {
+            "type": "boolean",
+            "title": "Retryable"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "code",
+          "retryable"
+        ],
+        "title": "RagErrorDetail"
+      },
+      "RagErrorResponse": {
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/RagErrorDetail"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "detail"
+        ],
+        "title": "RagErrorResponse"
+      },
+      "RetrieveRequest": {
+        "properties": {
+          "owner_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Owner Id"
+          },
+          "profile_id": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Profile Id"
+          },
+          "index_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "maxItems": 10,
+            "minItems": 1,
+            "title": "Index Ids"
+          },
+          "query": {
+            "type": "string",
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Query"
+          },
+          "top_k": {
+            "type": "integer",
+            "maximum": 8.0,
+            "minimum": 1.0,
+            "title": "Top K",
+            "default": 6
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "owner_id",
+          "profile_id",
+          "index_ids",
+          "query"
+        ],
+        "title": "RetrieveRequest"
+      },
+      "RetrieveResponse": {
+        "properties": {
+          "profile_id": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Profile Id"
+          },
+          "quality_status": {
+            "type": "string",
+            "const": "UNASSESSED",
+            "title": "Quality Status",
+            "default": "UNASSESSED"
+          },
+          "context_bytes": {
+            "type": "integer",
+            "maximum": 12000.0,
+            "minimum": 1.0,
+            "title": "Context Bytes"
+          },
+          "chunks": {
+            "items": {
+              "$ref": "#/components/schemas/RetrievedChunk"
+            },
+            "type": "array",
+            "maxItems": 8,
+            "minItems": 1,
+            "title": "Chunks"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "profile_id",
+          "context_bytes",
+          "chunks"
+        ],
+        "title": "RetrieveResponse"
+      },
+      "RetrievedChunk": {
+        "properties": {
+          "chunk_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Chunk Id"
+          },
+          "ordinal": {
+            "type": "integer",
+            "exclusiveMaximum": 5000.0,
+            "minimum": 0.0,
+            "title": "Ordinal"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "PAGE",
+              "SLIDE",
+              "NOTES"
+            ],
+            "title": "Kind"
+          },
+          "position": {
+            "type": "integer",
+            "maximum": 500.0,
+            "minimum": 1.0,
+            "title": "Position"
+          },
+          "start_offset": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Start Offset"
+          },
+          "end_offset": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "End Offset"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Text"
+          },
+          "text_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Text Sha256"
+          },
+          "index_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Index Id"
+          },
+          "document_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Document Id"
+          },
+          "version_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Version Id"
+          },
+          "source_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Source Sha256"
+          },
+          "similarity": {
+            "type": "number",
+            "maximum": 1.000001,
+            "minimum": -1.000001,
+            "title": "Similarity"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "chunk_id",
+          "ordinal",
+          "kind",
+          "position",
+          "start_offset",
+          "end_offset",
+          "text",
+          "text_sha256",
+          "index_id",
+          "document_id",
+          "version_id",
+          "source_sha256",
+          "similarity"
+        ],
+        "title": "RetrievedChunk"
+      },
+      "SourceCitation": {
+        "properties": {
+          "chunk": {
+            "$ref": "#/components/schemas/RetrievedChunk"
+          },
+          "quote": {
+            "type": "string",
+            "maxLength": 600,
+            "minLength": 1,
+            "title": "Quote"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "chunk",
+          "quote"
+        ],
+        "title": "SourceCitation"
+      },
+      "SourceSpan": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "PAGE",
+              "SLIDE",
+              "NOTES"
+            ],
+            "title": "Kind"
+          },
+          "position": {
+            "type": "integer",
+            "maximum": 500.0,
+            "minimum": 1.0,
+            "title": "Position"
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 1000000,
+            "title": "Text"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "position",
+          "text"
+        ],
+        "title": "SourceSpan"
+      }
+    }
+  }
+}

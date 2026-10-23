@@ -1,0 +1,5 @@
+simulation: google-embedding
+routing: path
+mocks:
+  - routeKey: v1beta
+    path: ../mocks/google-embedding/config.yaml

@@ -28,6 +28,10 @@ class ContractProvider:
             for question in questions
         ]}, ensure_ascii=False)
 
+    async def generate_grounded(self, prompt: str) -> str:
+        data=json.loads(prompt.split("Reference JSON follows:\n",1)[1]);chunk=data["excerpts"][0]
+        return json.dumps({"questions":[{"question_text":"Which principle does a stack use?","options":[{"text":text,"isCorrect":i==0} for i,text in enumerate(["LIFO","FIFO","Random","Sorted"])],"citations":[{"chunk_id":chunk["chunk_id"],"quote":chunk["text"]}]}]})
+
     async def aclose(self) -> None:
         pass
 

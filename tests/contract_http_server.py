@@ -6,6 +6,7 @@ import socket
 import uvicorn
 
 from tests.test_nestjs_contract import build_contract_app
+from tests.rag_http_fixture import enable_rag_fixture
 
 
 if __name__ == "__main__":
@@ -15,5 +16,5 @@ if __name__ == "__main__":
     listener.listen()
     print(json.dumps({"port": port}), flush=True)
     uvicorn.Server(uvicorn.Config(
-        build_contract_app(), log_level="error", access_log=False,
+        enable_rag_fixture(build_contract_app()), log_level="error", access_log=False,
     )).run(sockets=[listener])

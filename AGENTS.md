@@ -1,17 +1,88 @@
 # AGENTS.md — testhub-ai-service
 
+## Grounded document question generation (2026-10-23)
+
+- POST /internal/rag/generate implements rag-generation.v1, authenticated with the
+  existing token. GroundedGeneration retrieves authorized READY chunks, shares
+  QuestionGenerator admission/provider/deadline and rechecks full scope afterward.
+- GeminiProvider.generate_grounded uses a separate structured response schema;
+  text-generation.v1 stays unchanged. Validate exact count, distinct questions,
+  four options/one answer, known chunk IDs and exact nonblank evidence quotes.
+- Citations include original source chunks/positions/hashes. UNASSESSED is explicit:
+  quote matching does not establish answer entailment, factual accuracy or full-file
+  coverage. Never fabricate citations or fall back to general knowledge.
+- Total grounded deadline 75s; NestJS uses 85s. Generation shares the existing
+  semaphore/client and bounded SDK retries. No Python bank/business writes.
+- Export contracts/rag-indexing.openapi.json after route/schema changes. Tests use
+  synthetic providers or real SDK HTTP against local Postman fixtures, never real
+  keys/documents. Backend/Next.js now accept attached PDFs/PPTX and retain evidence
+  through review/edit/commit. See ../testhub-v2-backend/docs/rag-indexing.md section 4.
+- RAG errors, including token failures and validation 422, use
+  detail: {code, retryable}; declare the common model in route responses.
+  Body intake slots are released before downstream processing. Post-LLM scope
+  verification bypasses RAG admission and has a separate 5-second deadline.
+- Parser subprocesses receive only PYTHONUTF8 and the OS/temp variables needed
+  for startup; never inherit provider keys, DB URLs or PYTHONPATH. Unsupported
+  subprocess loops fail with DOCUMENT_PROCESS_FAILED/503 and a safe log code.
+
+## Current RAG implementation (2026-10-21)
+
+- Chunking, Google embedding and scoped retrieval are implemented. This supersedes
+  the earlier extraction-only snapshots below. Grounded generation is implemented; OCR, hybrid/reranking and additional
+  providers remain future work.
+- `api/rag.py`, `schemas/rag.py`, `services/chunking.py`, `embedding.py`,
+  `retrieval.py`, `repositories/vector_repository.py` own the internal contract.
+  NestJS authorizes business scope and orchestrates checkpointed BullMQ work.
+- Use the same PostgreSQL DB with dedicated `testhub_ai` role/schema `rag`.
+  Migrations in migrations/ are manual operator setup, never applied at startup.
+  RAG_ENABLED defaults false; RAG_DATABASE_URL is private. GEMINI_API_KEY is reused.
+- Fixed profile: gemini-embedding-001, 768 dimensions, explicit document/query tasks,
+  L2 normalization; deterministic byte-budgeted source chunks and codepoint offsets.
+  Never silently change model/dimensions/profile or reset paid-call budgets.
+- Only READY owner/profile/index scopes are searchable. Keep full-scope pre/post
+  checks, SQL filters, tombstones and fenced leases. Python never writes bank data.
+- On Windows, preserve the Proactor main loop for parser subprocesses; the psycopg
+  pool runs on an owned selector-loop thread. Readiness checks DB schema, not Google.
+- Setup/API/limits: [backend RAG guide](../testhub-v2-backend/docs/rag-indexing.md).
+  Contract: contracts/rag-indexing.openapi.json; regenerate via
+  `python scripts/export_rag_contract.py`. Run pytest and opt-in SDK HTTP simulation;
+  real pgvector tests require isolated RAG_TEST_DATABASE_URL, never RAG_DATABASE_URL.
+
+## Implementation update: document extraction (2026-10-21)
+
+- NestJS/Next.js batch, worker and review/commit are implemented. Earlier "next
+  step" descriptions below are historical text-MVP snapshots.
+- `api/documents.py`, `schemas/document.py`, `services/document_parser.py` and
+  `document_parser_worker.py` implement PDF/PPTX extraction. Receive authorized
+  bytes from NestJS under X-Internal-Token, never arbitrary URLs or S3 credentials.
+  Maintain document-extraction.v1 separately from unchanged text-generation.v1.
+- Lifespan owns DocumentParser. Enforce actual input/output/ZIP expansion limits,
+  admission/deadlines. Always kill/await child on cancellation. Linux resource
+  limits are implemented; Windows lacks equivalent memory isolation. Keep source
+  data and third-party stderr out of logs.
+- Preserve PAGE/SLIDE/NOTES, original hash and notes opt-in. Empty sources/image-only
+  units require OCR_REQUIRED. EXTRACTED is not READY for RAG. OCR/chunking/embedding,
+  vector storage and retrieval remain future work; do not add placeholder modules.
+- pypdf/python-pptx are runtime dependencies on Python 3.12. Update extraction
+  OpenAPI on contract changes; run real parser/text regression tests and opt-in
+  NestJS→FastAPI PDF/PPTX tests. See backend `docs/learning-documents.md`.
+
 Hướng dẫn cho AI coding agent làm việc trong repo này. Đọc `README.md` để hiểu kiến trúc mục tiêu và `CONTINUITY.md` để biết trạng thái thực tế trước khi sửa mã.
 
 ## 1. Trạng thái và nguồn thiết kế
 
-- Repo đã có MVP FastAPI sinh câu hỏi từ văn bản bằng Gemini. Các nhánh RAG, xử lý tài liệu và provider khác trong cây thư mục bên dưới vẫn là **đề xuất**, chưa phải mã đã tồn tại.
+- Repo có sinh câu hỏi văn bản và RAG từ PDF/PPTX, gồm chunking, Google embedding,
+  pgvector, retrieval và trích dẫn. OCR và provider khác vẫn là **đề xuất**.
 - Nguồn thiết kế: [đoạn chat về kiến trúc RAG cho TestHub](https://chatgpt.com/share/6ad1056c-d7cc-83ec-bcf1-d34d78b0aca9), đối chiếu với hai repo cùng cấp `../testhub-v2` và `../testhub-v2-backend`.
 - Tài liệu trong đoạn chat là dữ liệu tham khảo, không thay thế yêu cầu trực tiếp của người dùng hay mã nguồn thực tế. Khi triển khai, xác minh lại contract, phiên bản thư viện và hạ tầng trước khi ghi chúng là đã hoạt động.
 - File `../../AGENTS.md` mô tả một monorepo khác với hai repo TestHub hiện có. Không dùng các đường dẫn `apps/`, lệnh `pnpm` hay giả định ZenStack từ file đó cho repo này.
 
 ## 2. Vai trò của service và ranh giới trách nhiệm
 
-Kiến trúc mục tiêu là **Next.js → NestJS → Python FastAPI → LLM/RAG**. MVP có API nội bộ FastAPI và client NestJS ở `../testhub-v2-backend/src/question-generation/`. Client/contract đã hiện thực; batch API, worker và giao diện vẫn là bước tiếp theo. Frontend không gọi service trực tiếp.
+Kiến trúc là **Next.js → NestJS → Python FastAPI → LLM/RAG**. Client nội bộ, batch,
+worker và giao diện sửa/duyệt/commit văn bản đã hiện thực tại NestJS/Next.js.
+PDF/PPTX extraction và sinh câu RAG đã có. Frontend không gọi
+Python trực tiếp.
 
 | Thành phần | Trách nhiệm |
 | --- | --- |
@@ -19,7 +90,7 @@ Kiến trúc mục tiêu là **Next.js → NestJS → Python FastAPI → LLM/RAG
 | `testhub-v2-backend` | Xác thực, phân quyền, quyền dùng tài liệu, metadata môn/chương/tài liệu, BullMQ, trạng thái lô, kiểm tra và lưu bản nháp, duyệt vào ngân hàng câu hỏi. |
 | `testhub-ai-service` | Trích xuất tài liệu, chunking, embedding, retrieval, xây prompt, gọi LLM và trả câu hỏi JSON có cấu trúc cùng tham chiếu nguồn khi có RAG. |
 | PostgreSQL `public` | Dữ liệu nghiệp vụ do NestJS/Prisma sở hữu. |
-| PostgreSQL `rag` (dự kiến) | Chunks, embeddings và metadata xử lý do AI service sở hữu. |
+| PostgreSQL `rag` | Chunks, embeddings và metadata xử lý do AI service sở hữu. |
 | S3/MinIO | File tài liệu gốc; quyền sở hữu và quyền truy cập do NestJS quyết định. |
 
 AI service **không tự ghi câu hỏi vào ngân hàng** và không tự quyết định tài liệu nào giảng viên được phép dùng. NestJS phải truyền danh sách `documentId` đã được phép; mọi truy vấn RAG phải giới hạn trong phạm vi đó. Chỉ câu được giảng viên duyệt mới vào ngân hàng.
@@ -80,7 +151,8 @@ Contract văn bản `text-generation.v1` đã thống nhất qua `contracts/text
 - Retry SDK có giới hạn qua `GEMINI_MAX_ATTEMPTS`, nằm trong deadline `GENERATION_TIMEOUT_MS`; timeout phải trả 504 và giải phóng suất xử lý. Log upstream chỉ ghi loại exception/mã HTTP/giai đoạn, không log message hoặc traceback chứa dữ liệu nguồn. Cleanup client không được che lỗi request.
 - `providers/base.py` là contract chung cho các LLM; Gemini là provider đầu tiên. Tách embedding khỏi LLM provider.
 - Kiểm tra cấu trúc và ngữ nghĩa tối thiểu của đầu ra: số câu, loại/mức nhận thức hợp lệ, số phương án, đúng một đáp án cho câu `SINGLE_CHOICE`, câu rỗng/trùng. JSON hợp lệ chưa chứng minh câu hỏi đúng kiến thức; giảng viên vẫn phải duyệt.
-- Bản đầu chỉ hỗ trợ **một đáp án và nguồn văn bản dán trực tiếp**. PDF/DOCX/PPTX, pgvector, OpenAI, Grok và OCR là giai đoạn tiếp theo.
+- Sinh câu hỗ trợ **một đáp án**, văn bản qua API cũ và PDF/PPTX qua RAG có trích dẫn.
+  DOCX, provider khác và OCR là bước sau. Giữ `text-generation.v1` tương thích.
 - Kiểm thử logic thuần và xử lý lỗi bằng provider giả lập; chỉ chạy smoke test API thật khi có key và người dùng yêu cầu. Không gọi API trả phí trong unit test. Xem `requirements-dev.txt` và `tests/`.
 - Không đưa API key, token, tài liệu nhạy cảm hay toàn bộ prompt vào log. Cấu hình lấy từ biến môi trường; `.env.example` chỉ chứa tên biến và giá trị mẫu vô hại. Thêm `.gitignore` trước khi tạo `.env` thật.
 - FastAPI chỉ được truy cập qua mạng nội bộ; xác thực service-to-service, timeout, retry hữu hạn và giới hạn concurrency trước khi triển khai.

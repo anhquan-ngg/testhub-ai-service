@@ -1,8 +1,122 @@
 # CONTINUITY.md — testhub-ai-service
 
+## RAG/parser review corrections (2026-10-23)
+
+- RagBodyLimit releases its four intake slots as soon as body reading completes,
+  before downstream processing. Failed intake never reaches FastAPI; existing
+  408/413/503 and disconnect behavior is retained.
+- Six RAG routes declare RagErrorResponse (detail.code/detail.retryable) for
+  supported errors, including 422. RAG authentication now uses the same shape for
+  401 and missing-token configuration 503; text/document auth remains unchanged.
+  Regenerated contracts/rag-indexing.openapi.json; drift checks passed.
+- DocumentParser catches unsupported subprocess event loops separately, logs
+  document_subprocess_unsupported_loop and returns DOCUMENT_PROCESS_FAILED/503.
+  Child env is limited to PYTHONUTF8 and OS/temp startup variables; no inherited
+  provider keys, DB URLs or PYTHONPATH. Other spawn arguments/cleanup are unchanged.
+- Post-LLM verify_scope runs directly with a separate 5-second deadline, bypassing
+  the 100 ms RAG admission window. RagError is preserved; unexpected storage errors
+  map to retryable RAG_STORAGE_UNAVAILABLE, timeout to retryable RAG_DEADLINE.
+- README's current tree/status now includes implemented RAG schemas, services,
+  repositories, migrations and contracts; OCR/other providers remain future work.
+- Validation: 57 focused tests passed; full pytest 96 passed / 3 skipped.
+  Two additional enabled Postman simulation tests passed with real SDK HTTP;
+  request events confirmed embedding 200/429/403 and grounded generation 200.
+  The existing local mock uses synthetic content/vectors/provider responses;
+  no paid provider or live database was used. compileall, pip check and
+  git diff --check passed. Real pgvector integration remains unverified.
+
+### Verification for grounded generation (2026-10-23)
+
+- Full pytest: **80 passed, 3 skipped**. Eight grounded tests cover exact/corrupt
+  citations, unknown chunks, duplicates, wrong answers/count, strict input/auth,
+  pre/post-call scope and cancellation releasing the shared generation slot.
+- Enabled local Postman Google simulation: **2 passed**, exercising real SDK HTTP
+  embedding/retrieval/structured generation and 429/403 handling against synthetic
+  responses. It does not prove Google semantic quality or live quota access.
+- RAG OpenAPI regenerated; contract drift check passed. pip check/compileall passed.
+  Existing text-generation.v1 remains unchanged. Real pgvector and live S3/browser
+  E2E remain unverified; no credentials, source documents or paid calls were used.
+
+## Grounded document question generation (2026-10-23)
+
+- POST /internal/rag/generate implements rag-generation.v1, authenticated with the
+  existing token. GroundedGeneration retrieves authorized READY chunks, shares
+  QuestionGenerator admission/provider/deadline and rechecks full scope afterward.
+- GeminiProvider.generate_grounded uses a separate structured response schema;
+  text-generation.v1 stays unchanged. Validate exact count, distinct questions,
+  four options/one answer, known chunk IDs and exact nonblank evidence quotes.
+- Citations include original source chunks/positions/hashes. UNASSESSED is explicit:
+  quote matching does not establish answer entailment, factual accuracy or full-file
+  coverage. Never fabricate citations or fall back to general knowledge.
+- Total grounded deadline 75s; NestJS uses 85s. Generation shares the existing
+  semaphore/client and bounded SDK retries. No Python bank/business writes.
+- Export contracts/rag-indexing.openapi.json after route/schema changes. Tests use
+  synthetic providers or real SDK HTTP against local Postman fixtures, never real
+  keys/documents. Backend/Next.js now accept attached PDFs/PPTX and retain evidence
+  through review/edit/commit. See ../testhub-v2-backend/docs/rag-indexing.md section 4.
+
+### Verified RAG checks (2026-10-21)
+
+- Full pytest: **72 passed, 2 skipped** (local Postman simulation and real pgvector
+  tests opt in). Separate enabled SDK/Postman HTTP test: **1 passed**, with actual
+  simulation request events for 200, 429 and 403. No paid Google requests.
+- Installed psycopg 3.3.6 / psycopg-pool 3.3.3 in Python 3.12 venv; pip check and
+  compileall passed. SDK is google-genai 1.75.0. Chunk Unicode/offset/byte coverage,
+  finite/dimension normalization, cancellation, checkpoint cleanup, pre/post scope,
+  HTTP auth/limits/safe validation, selector bridge and contract drift passed.
+- Backend-to-FastAPI RAG HTTP transport passed with synthetic embedding/repository;
+  this does not test SQL persistence. Docker daemon unavailable, so real pgvector
+  integration remains unverified. Migrations/account setup were not applied.
+
+## Current RAG implementation (2026-10-21)
+
+- Chunking, Google embedding and scoped retrieval are implemented. This supersedes
+  the earlier extraction-only snapshots below. Grounded generation is implemented; OCR, hybrid/reranking and additional
+  providers remain future work.
+- `api/rag.py`, `schemas/rag.py`, `services/chunking.py`, `embedding.py`,
+  `retrieval.py`, `repositories/vector_repository.py` own the internal contract.
+  NestJS authorizes business scope and orchestrates checkpointed BullMQ work.
+- Use the same PostgreSQL DB with dedicated `testhub_ai` role/schema `rag`.
+  Migrations in migrations/ are manual operator setup, never applied at startup.
+  RAG_ENABLED defaults false; RAG_DATABASE_URL is private. GEMINI_API_KEY is reused.
+- Fixed profile: gemini-embedding-001, 768 dimensions, explicit document/query tasks,
+  L2 normalization; deterministic byte-budgeted source chunks and codepoint offsets.
+  Never silently change model/dimensions/profile or reset paid-call budgets.
+- Only READY owner/profile/index scopes are searchable. Keep full-scope pre/post
+  checks, SQL filters, tombstones and fenced leases. Python never writes bank data.
+- On Windows, preserve the Proactor main loop for parser subprocesses; the psycopg
+  pool runs on an owned selector-loop thread. Readiness checks DB schema, not Google.
+- Setup/API/limits: [backend RAG guide](../testhub-v2-backend/docs/rag-indexing.md).
+  Contract: contracts/rag-indexing.openapi.json; regenerate via
+  `python scripts/export_rag_contract.py`. Run pytest and opt-in SDK HTTP simulation;
+  real pgvector tests require isolated RAG_TEST_DATABASE_URL, never RAG_DATABASE_URL.
+
 Tệp bàn giao trạng thái. Chỉ ghi điều đã xác minh từ repo hoặc được người dùng xác nhận; tách rõ thiết kế dự kiến khỏi mã nguồn đã có.
 
 ## Trạng thái hiện tại
+
+### Cập nhật 2026-10-21 — PDF/PPTX extraction
+
+- Đã triển khai `/internal/documents/extract`, application/octet-stream và
+  X-Internal-Token. Không fetch URL, không credential S3/DB và không gọi Gemini.
+- Schema document-extraction.v1 giữ source hash, phiên bản parser thực, notes opt-in,
+  unit_count, PAGE/SLIDE/NOTES, warnings và EXTRACTED/OCR_REQUIRED. Không có RAG index.
+- pypdf 6.21.1 và python-pptx 1.0.2 được cài vào .venv Python 3.12. Parser nằm trong
+  process con có deadline/kill/await, temp cleanup, giới hạn thực bytes/ZIP/text;
+  cap memory/CPU bổ sung trên POSIX, Windows local không có OS cap tương đương.
+- OpenAPI export ở contracts/document-extraction.openapi.json, tái tạo bằng
+  `python scripts/export_document_contract.py`; test chống contract drift.
+- Backend/Next.js đã có batch/review/commit văn bản và nay có document metadata,
+  immutable versions, queue worker riêng, upload/polling/preview. Migration do
+  NestJS sở hữu, không áp vào DB người dùng trong phiên này. Xem hướng dẫn backend.
+- Kiểm tra parser và generation regression: **53 pytest pass**; compileall pass,
+  pip check không dependency hỏng. Test có file PDF text/mã hóa/scan-trộn-text,
+  PPTX text/notes/group-image, malformed/oversized/ZIP, deadline giết child và
+  giải phóng slot. HTTP thật Nest client→FastAPI→PDF/PPTX đã pass; không gọi LLM trả phí.
+- Chưa xác nhận live S3/CORS/IAM hoặc full browser/database E2E; Docker daemon
+  local không hoạt động. Chunking/embedding/pgvector/retrieval/OCR vẫn chưa có.
+
+### Historical text MVP snapshot (2026-10-16)
 
 - Repo `testhub-ai-service` ở nhánh `master`, ban đầu chỉ có `.git`. Hiện đã có MVP FastAPI trong `app/`, test trong `tests/`, dependency, Dockerfile, `.dockerignore`, `.env.example` và bốn file tài liệu. Chưa có DB, migration, parser hoặc RAG. NestJS đã có client HTTP và service kiểm tra quyền/consent; public batch API/worker/UI chưa triển khai.
 - Kiến trúc dài hạn bắt nguồn từ [đoạn chat chia sẻ](https://chatgpt.com/share/6ad1056c-d7cc-83ec-bcf1-d34d78b0aca9); MVP được triển khai theo yêu cầu người dùng ngày 16/10/2026.

@@ -48,13 +48,21 @@ class GeminiProvider:
 
     async def generate(self, prompt: str) -> str:
         """Generate structured JSON using the application's shared SDK client."""
+        return await self._generate(prompt, GeminiQuestionList)
+
+    async def generate_grounded(self, prompt: str) -> str:
+        """Use a separate structured schema without changing the text contract."""
+        from app.schemas.grounded_generation import GeminiGroundedQuestionList
+        return await self._generate(prompt, GeminiGroundedQuestionList)
+
+    async def _generate(self, prompt: str, schema: type) -> str:
         try:
             response = await self._client.aio.models.generate_content(
                 model=self.model,
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
-                    response_schema=GeminiQuestionList,
+                    response_schema=schema,
                 ),
             )
             if not response.text:
