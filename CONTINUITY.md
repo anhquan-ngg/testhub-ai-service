@@ -1,5 +1,20 @@
 # CONTINUITY.md — testhub-ai-service
 
+## Blueprint round-trip and threaded spawn review (2026-10-24)
+
+- Legacy format/count requests retain question_configs=None; slots() expands
+  single-choice slots without mutating the request. Both legacy/config requests
+  now survive model_dump followed by model_validate (Python and JSON modes).
+- Selector-loop fallback offloads Popen itself via asyncio.to_thread and shields
+  its task until ownership is recovered after cancellation, then uses the existing
+  ThreadedProcess wait/kill cleanup. Spawn args and minimal env are unchanged.
+- README uses one slot to match its sample response; a regression test validates
+  both examples and runs check_slots().
+- Validation: 39 focused tests passed; full pytest 139 passed / 3 opt-in tests
+  skipped. Tests gate threaded spawning to verify event-loop responsiveness,
+  cancellation/deadline cleanup and capacity reuse. compileall and whitespace
+  checks passed (existing CRLF recognized). No paid calls or live DB verification.
+
 ## Windows README clarification (2026-10-23)
 
 - README now describes asyncio parser subprocesses on Proactor loops and Popen

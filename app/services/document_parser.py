@@ -96,13 +96,24 @@ class DocumentParser:
                 }},
             }
             process: asyncio.subprocess.Process | ThreadedProcess
+            cancelled = False
             try:
                 process = await asyncio.create_subprocess_exec(*args, **options)
             except NotImplementedError:
                 # e.g. uvicorn --reload on Windows runs a SelectorEventLoop.
                 logger.info("document_subprocess_thread_fallback")
-                process = ThreadedProcess(subprocess.Popen(args, **options))
+                spawn = asyncio.create_task(asyncio.to_thread(subprocess.Popen, args, **options))
+                # A cancelled await cannot stop Popen's thread. Retain ownership
+                # until it returns so the existing cleanup can kill/reap the child.
+                while True:
+                    try:
+                        process = ThreadedProcess(await asyncio.shield(spawn))
+                        break
+                    except asyncio.CancelledError:
+                        cancelled = True
             try:
+                if cancelled:
+                    raise asyncio.CancelledError
                 await process.wait()
             finally:
                 if process.returncode is None:

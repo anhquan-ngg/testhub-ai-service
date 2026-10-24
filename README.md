@@ -104,8 +104,7 @@ Header bắt buộc: `X-Internal-Token: <INTERNAL_API_TOKEN>`.
   "text": "Tìm kiếm nhị phân hoạt động trên mảng đã sắp xếp và có độ phức tạp O(log n).",
   "topic": "Cấu trúc dữ liệu",
   "question_configs": [
-    { "question_type": "SINGLE_CHOICE", "question_format": "KNOWLEDGE", "count": 1 },
-    { "question_type": "MULTIPLE_CHOICE", "question_format": "APPLYING", "count": 1 }
+    { "question_type": "SINGLE_CHOICE", "question_format": "KNOWLEDGE", "count": 1 }
   ]
 }
 ```

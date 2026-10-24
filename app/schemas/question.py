@@ -59,18 +59,16 @@ class QuestionBlueprint(BaseModel):
         if self.question_configs is None:
             if self.question_format is None or self.count is None:
                 raise ValueError("Provide question_configs or question_format with count")
-            self.question_configs = [QuestionConfig(
-                question_type=QuestionType.SINGLE_CHOICE,
-                question_format=self.question_format, count=self.count,
-            )]
         elif legacy:
             raise ValueError("question_configs cannot be combined with question_format/count")
-        if sum(config.count for config in self.question_configs) > MAX_TOTAL_QUESTIONS:
+        if sum(config.count for config in self.question_configs or []) > MAX_TOTAL_QUESTIONS:
             raise ValueError(f"At most {MAX_TOTAL_QUESTIONS} questions can be requested")
         return self
 
     def slots(self) -> list[QuestionSlot]:
-        """Expand configs into the ordered type/level expected for every question."""
+        """Expand configs or legacy fields into the ordered type/level for each question."""
+        if self.question_configs is None and self.question_format is not None and self.count is not None:
+            return [QuestionSlot(QuestionType.SINGLE_CHOICE, self.question_format) for _ in range(self.count)]
         return [
             QuestionSlot(config.question_type, config.question_format)
             for config in self.question_configs or []

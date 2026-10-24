@@ -4,6 +4,7 @@ import asyncio
 import io
 import subprocess
 import sys
+import threading
 import zipfile
 
 import pytest
@@ -271,6 +272,64 @@ def test_windows_selector_loop_extracts_like_uvicorn_reload():
     async def run():
         return await DocumentParser().extract(stream(), "PDF", False)
     assert asyncio.run(run(), loop_factory=asyncio.SelectorEventLoop).status == "EXTRACTED"
+
+
+@pytest.mark.parametrize("stop", ["cancel", "deadline"])
+def test_threaded_spawn_cancellation_retains_and_reaps_child(monkeypatch, stop):
+    original = subprocess.Popen
+    main_thread = threading.get_ident()
+    entered, release = threading.Event(), threading.Event()
+    children = []
+
+    async def unsupported(*args, **kwargs):
+        raise NotImplementedError
+
+    def delayed_spawn(args, **kwargs):
+        assert threading.get_ident() != main_thread
+        entered.set()
+        if not release.wait(5):
+            raise RuntimeError("Test did not release spawn")
+        child = original([sys.executable, "-c", "import time; time.sleep(10)"], **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", unsupported)
+    monkeypatch.setattr(subprocess, "Popen", delayed_spawn)
+
+    async def stream():
+        yield pdf_bytes()
+
+    async def run():
+        parser = DocumentParser(timeout_seconds=0.05 if stop == "deadline" else 5, max_concurrency=1)
+        active = asyncio.create_task(parser.extract(stream(), "PDF", False))
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            if stop == "cancel":
+                active.cancel()
+                await asyncio.sleep(0.02)
+            else:
+                await asyncio.sleep(0.1)
+            # The loop remains responsive, but cancellation must wait for ownership.
+            assert not active.done()
+            assert parser._slots._value == 0
+            release.set()
+            expected = asyncio.CancelledError if stop == "cancel" else ExtractionError
+            with pytest.raises(expected) as error:
+                await asyncio.wait_for(active, 3)
+            if stop == "deadline":
+                assert error.value.code == "DOCUMENT_TIMEOUT"
+            assert len(children) == 1 and children[0].poll() is not None
+            assert parser._slots._value == 1
+            monkeypatch.setattr(subprocess, "Popen", original)
+            parser.timeout_seconds = 10
+            assert (await parser.extract(stream(), "PDF", False)).status == "EXTRACTED"
+        finally:
+            release.set()
+            if not active.done():
+                active.cancel()
+            await asyncio.gather(active, return_exceptions=True)
+
+    asyncio.run(run())
 
 
 def test_parser_child_receives_only_minimal_environment(monkeypatch):

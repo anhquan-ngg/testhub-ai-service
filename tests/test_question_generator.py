@@ -138,3 +138,30 @@ def test_legacy_format_and_count_become_single_choice_slots() -> None:
     assert [(slot.question_type.value, slot.question_format.value) for slot in request(2).slots()] == [
         ("SINGLE_CHOICE", "KNOWLEDGE"), ("SINGLE_CHOICE", "KNOWLEDGE"),
     ]
+
+
+@pytest.mark.parametrize("blueprint", [request, mixed_request])
+def test_blueprint_dump_can_be_validated_again(blueprint) -> None:
+    original = blueprint()
+    slots = original.slots()
+    for mode in ("python", "json"):
+        restored = GenerateRequest.model_validate(original.model_dump(mode=mode))
+        assert restored.slots() == slots
+        assert restored.model_dump() == original.model_dump()
+    if original.question_format is not None:
+        assert original.question_configs is None
+
+
+def test_readme_request_and_response_match_slots() -> None:
+    import re
+    from pathlib import Path
+    from app.schemas.question import GenerateResponse
+    from app.services.question_generator import check_slots
+
+    section = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8").split(
+        "## Contract `POST /internal/generate`", 1,
+    )[1]
+    examples = re.findall(r"```json\s*([\s\S]*?)```", section)
+    command = GenerateRequest.model_validate_json(examples[0])
+    response = GenerateResponse.model_validate_json(examples[1])
+    check_slots(response.questions, command.slots())
