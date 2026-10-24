@@ -1,5 +1,80 @@
 # CONTINUITY.md — testhub-ai-service
 
+## Blueprint round-trip and threaded spawn review (2026-10-24)
+
+- Legacy format/count requests retain question_configs=None; slots() expands
+  single-choice slots without mutating the request. Both legacy/config requests
+  now survive model_dump followed by model_validate (Python and JSON modes).
+- Selector-loop fallback offloads Popen itself via asyncio.to_thread and shields
+  its task until ownership is recovered after cancellation, then uses the existing
+  ThreadedProcess wait/kill cleanup. Spawn args and minimal env are unchanged.
+- README uses one slot to match its sample response; a regression test validates
+  both examples and runs check_slots().
+- Validation: 39 focused tests passed; full pytest 139 passed / 3 opt-in tests
+  skipped. Tests gate threaded spawning to verify event-loop responsiveness,
+  cancellation/deadline cleanup and capacity reuse. compileall and whitespace
+  checks passed (existing CRLF recognized). No paid calls or live DB verification.
+
+## Windows README clarification (2026-10-23)
+
+- README now describes asyncio parser subprocesses on Proactor loops and Popen
+  with waiting in a thread on selector loops, matching DocumentParser. Existing
+  psycopg pool ownership and readiness descriptions are unchanged.
+- Validation: checked parser, Windows pool and readiness code; documentation-only
+  change, no runtime tests run. Diff whitespace check passed with CRLF recognized.
+
+## Intake authentication and revoke scope review (2026-10-23)
+
+- RagBodyLimit now reuses require_internal_token before slot acquisition/body intake;
+  missing/invalid tokens return the existing RAG 401 envelope without reading bytes.
+  Unconfigured auth returns 503. Authenticated limits/replay behavior is unchanged.
+- VectorRepository.revoke checks profile plus all five persisted source-scope fields
+  under its advisory transaction lock before any write. Mismatch returns 404;
+  matching REVOKED indexes and absent-index tombstones remain replayable.
+- PPTX image detection uses Picture (including PlaceholderPicture) and retains group
+  recursion. PDF strict=True is intentional: structural errors reported by strict
+  parsing are rejected even when recovery mode could read the source.
+- Extraction guidance now leaves only OCR in its outdated future-work sentence.
+  RAG guide links in README/AGENTS/CONTINUITY use the backend GitHub master URL;
+  owner/repo/default branch verified from Git metadata and the target exists locally.
+- Validation: 44 focused tests passed; full pytest 134 passed / 3 opt-in tests skipped.
+  New tests cover no-body/no-slot auth rejection, all six revoke scope mismatches,
+  revoked/absent-index replay, picture placeholders and recoverable PDF xref damage.
+  compileall and pip check passed; diff check passed with CRLF recognized via
+  core.whitespace=cr-at-eol (existing Windows line endings). OpenAPI drift tests pass.
+  No live PostgreSQL/pgvector or paid provider calls; GitHub URL access not tested.
+
+## Grounded quote matching and 502 diagnostics (2026-10-23)
+
+- Symptom: /internal/rag/generate 502 (RAG_OUTPUT_INVALID) with no log line. Exact
+  quote matching rejected Gemini quotes that differ from PDF chunk text only by
+  whitespace/line breaks or Unicode form (NFD vs NFC Vietnamese). locate_quote now
+  matches after per-character NFD + whitespace collapse and stores the exact source
+  span (still a verbatim substring, <=600 chars); fabricated quotes are rejected.
+- Every grounded rejection logs `generation_invalid_output reason=` schema |
+  duplicate_citations | unknown_chunk | quote_mismatch (plus count/answers).
+- Validation: grounded tests 21 passed. Root cause inferred from code paths; the
+  user's document and live Gemini output were not inspected.
+
+## Parser fallback for uvicorn --reload on Windows (2026-10-23)
+
+- Symptom: `document_subprocess_unsupported_loop` + 503 on /internal/documents/extract.
+  uvicorn 0.54 uses SelectorEventLoop on Windows when --reload is set, which cannot
+  run asyncio subprocesses. DocumentParser now falls back to subprocess.Popen waited
+  via asyncio.to_thread (same minimal env, kill on deadline/cancel); log code
+  `document_subprocess_thread_fallback`.
+- Validation: tests/test_documents.py 18 passed, including a real Windows
+  SelectorEventLoop extraction and a fallback deadline-kill test.
+
+## Question configs for generation (2026-10-23)
+
+- Added QuestionType/QuestionConfig/QuestionBlueprint; text and grounded requests
+  accept question_configs or the legacy question_format+count. Prompts list ordered
+  slots; check_slots validates count and per-type correct options.
+- Validation: full pytest **108 passed, 3 skipped** (new tests for mixed configs,
+  wrong-slot answers, invalid/ambiguous configs, legacy normalization and grounded
+  ordering). RAG OpenAPI regenerated; drift test passes. No paid calls were made.
+
 ## RAG/parser review corrections (2026-10-23)
 
 - RagBodyLimit releases its four intake slots as soon as body reading completes,
@@ -53,7 +128,7 @@
 - Export contracts/rag-indexing.openapi.json after route/schema changes. Tests use
   synthetic providers or real SDK HTTP against local Postman fixtures, never real
   keys/documents. Backend/Next.js now accept attached PDFs/PPTX and retain evidence
-  through review/edit/commit. See ../testhub-v2-backend/docs/rag-indexing.md section 4.
+  through review/edit/commit. See https://github.com/anhquan-ngg/testhub-v2-backend/blob/master/docs/rag-indexing.md section 4.
 
 ### Verified RAG checks (2026-10-21)
 
@@ -86,7 +161,7 @@
   checks, SQL filters, tombstones and fenced leases. Python never writes bank data.
 - On Windows, preserve the Proactor main loop for parser subprocesses; the psycopg
   pool runs on an owned selector-loop thread. Readiness checks DB schema, not Google.
-- Setup/API/limits: [backend RAG guide](../testhub-v2-backend/docs/rag-indexing.md).
+- Setup/API/limits: [backend RAG guide](https://github.com/anhquan-ngg/testhub-v2-backend/blob/master/docs/rag-indexing.md).
   Contract: contracts/rag-indexing.openapi.json; regenerate via
   `python scripts/export_rag_contract.py`. Run pytest and opt-in SDK HTTP simulation;
   real pgvector tests require isolated RAG_TEST_DATABASE_URL, never RAG_DATABASE_URL.

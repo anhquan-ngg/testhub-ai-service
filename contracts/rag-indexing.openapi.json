@@ -915,6 +915,45 @@
       },
       "GroundedGenerateRequest": {
         "properties": {
+          "question_format": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/QuestionFormat"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "count": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 20.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Count"
+          },
+          "question_configs": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/QuestionConfig"
+                },
+                "type": "array",
+                "maxItems": 10,
+                "minItems": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Question Configs"
+          },
           "owner_id": {
             "type": "string",
             "format": "uuid",
@@ -947,15 +986,6 @@
             "minimum": 1.0,
             "title": "Top K",
             "default": 6
-          },
-          "question_format": {
-            "$ref": "#/components/schemas/QuestionFormat"
-          },
-          "count": {
-            "type": "integer",
-            "maximum": 20.0,
-            "minimum": 1.0,
-            "title": "Count"
           }
         },
         "additionalProperties": false,
@@ -964,11 +994,10 @@
           "owner_id",
           "profile_id",
           "index_ids",
-          "query",
-          "question_format",
-          "count"
+          "query"
         ],
-        "title": "GroundedGenerateRequest"
+        "title": "GroundedGenerateRequest",
+        "description": "Retrieval scope plus legacy question_format/count or ordered question_configs."
       },
       "GroundedGenerateResponse": {
         "properties": {
@@ -1025,9 +1054,7 @@
             "title": "Options"
           },
           "question_type": {
-            "type": "string",
-            "const": "SINGLE_CHOICE",
-            "title": "Question Type",
+            "$ref": "#/components/schemas/QuestionType",
             "default": "SINGLE_CHOICE"
           },
           "question_format": {
@@ -1225,6 +1252,31 @@
         ],
         "title": "PrepareIndexRequest"
       },
+      "QuestionConfig": {
+        "properties": {
+          "question_type": {
+            "$ref": "#/components/schemas/QuestionType"
+          },
+          "question_format": {
+            "$ref": "#/components/schemas/QuestionFormat"
+          },
+          "count": {
+            "type": "integer",
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Count"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "question_type",
+          "question_format",
+          "count"
+        ],
+        "title": "QuestionConfig",
+        "description": "One requested row: question type, cognitive level and number of questions."
+      },
       "QuestionFormat": {
         "type": "string",
         "enum": [
@@ -1255,6 +1307,14 @@
           "isCorrect"
         ],
         "title": "QuestionOption"
+      },
+      "QuestionType": {
+        "type": "string",
+        "enum": [
+          "SINGLE_CHOICE",
+          "MULTIPLE_CHOICE"
+        ],
+        "title": "QuestionType"
       },
       "RagErrorDetail": {
         "properties": {

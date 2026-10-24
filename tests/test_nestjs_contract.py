@@ -48,7 +48,7 @@ def build_contract_app() -> FastAPI:
 def test_versioned_nestjs_contract() -> None:
     fixture = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
     assert fixture["version"] == "text-generation.v1"
-    assert GenerateRequest.model_validate(fixture["internal_request"]).count == 1
+    assert len(GenerateRequest.model_validate(fixture["internal_request"]).slots()) == 1
     GenerateResponse.model_validate_json(json.dumps(fixture["internal_response"]))
     with TestClient(build_contract_app()) as client:
         response = client.post(

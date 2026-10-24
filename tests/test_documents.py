@@ -2,7 +2,9 @@
 
 import asyncio
 import io
+import subprocess
 import sys
+import threading
 import zipfile
 
 import pytest
@@ -125,6 +127,36 @@ def test_mixed_pptx_flags_image_inside_group(client):
     assert result["unit_count"] == 2
 
 
+def test_mixed_pptx_flags_image_inside_picture_placeholder(client):
+    from PIL import Image
+    from pptx.shapes.picture import Picture
+    from pptx.shapes.placeholder import PicturePlaceholder
+    presentation = Presentation(io.BytesIO(pptx_bytes()))
+    slide = presentation.slides.add_slide(presentation.slide_layouts[8])
+    placeholder = next(shape for shape in slide.placeholders if isinstance(shape, PicturePlaceholder))
+    image = io.BytesIO()
+    Image.new("RGB", (10, 10), "white").save(image, format="PNG")
+    image.seek(0)
+    picture = placeholder.insert_picture(image)
+    assert isinstance(picture, Picture)
+    assert picture.shape_type != 13
+    target = io.BytesIO()
+    presentation.save(target)
+    result = extract(client, target.getvalue(), "PPTX").json()
+    assert result["status"] == "OCR_REQUIRED"
+    assert result["spans"][1]["text"] == ""
+
+
+def test_strict_pdf_policy_rejects_recoverable_xref_damage(client):
+    import re
+    from pypdf import PdfReader
+    damaged = re.sub(rb"startxref\s+\d+", b"startxref\n1", pdf_bytes())
+    assert PdfReader(io.BytesIO(damaged), strict=False).pages[0].extract_text().strip() == "Stack uses LIFO."
+    response = extract(client, damaged)
+    assert response.status_code == 422
+    assert response.json() == {"detail": "DOCUMENT_INVALID"}
+
+
 def test_encrypted_pdf_is_rejected_without_password_or_source_leak(client):
     response = extract(client, pdf_bytes(encrypted=True))
     assert response.status_code == 422
@@ -188,22 +220,116 @@ def test_deadline_kills_child_and_releases_capacity(monkeypatch):
     asyncio.run(run())
 
 
-def test_unsupported_subprocess_loop_is_reported_safely(monkeypatch, caplog):
+def test_unsupported_subprocess_loop_falls_back_to_threaded_child(monkeypatch, caplog):
+    caplog.set_level("INFO")
+    original = subprocess.Popen
+    environments = []
     async def unsupported(*args, **kwargs):
         raise NotImplementedError("PRIVATE loop details")
+    def capture(*args, **kwargs):
+        environments.append(kwargs["env"])
+        return original(*args, **kwargs)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", unsupported)
+    monkeypatch.setattr(subprocess, "Popen", capture)
+    monkeypatch.setenv("GEMINI_API_KEY", "synthetic-not-a-real-key")
     async def stream():
-        yield b"%PDF-fixture"
+        yield pdf_bytes()
     async def run():
         parser = DocumentParser(max_concurrency=1)
-        with pytest.raises(ExtractionError) as error:
-            await parser.extract(stream(), "PDF", False)
-        assert error.value.code == "DOCUMENT_PROCESS_FAILED"
-        assert error.value.status == 503
+        assert (await parser.extract(stream(), "PDF", False)).status == "EXTRACTED"
         assert parser._slots._value == 1
     asyncio.run(run())
-    assert "document_subprocess_unsupported_loop" in caplog.text
+    assert set(environments[0]) <= {"PYTHONUTF8", "SystemRoot", "WINDIR", "TEMP", "TMP"}
+    assert "document_subprocess_thread_fallback" in caplog.text
     assert "PRIVATE" not in caplog.text
+
+
+def test_threaded_child_is_killed_at_deadline(monkeypatch):
+    original = subprocess.Popen
+    children = []
+    async def unsupported(*args, **kwargs):
+        raise NotImplementedError
+    def slow(args, **kwargs):
+        children.append(original([sys.executable, "-c", "import time; time.sleep(10)"], **kwargs))
+        return children[-1]
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", unsupported)
+    monkeypatch.setattr(subprocess, "Popen", slow)
+    async def stream():
+        yield pdf_bytes()
+    async def run():
+        parser = DocumentParser(timeout_seconds=0.5, max_concurrency=1)
+        with pytest.raises(ExtractionError, match="DOCUMENT_TIMEOUT"):
+            await parser.extract(stream(), "PDF", False)
+        assert children[0].poll() is not None
+        assert parser._slots._value == 1
+    asyncio.run(run())
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows selector loops lack subprocess support")
+def test_windows_selector_loop_extracts_like_uvicorn_reload():
+    async def stream():
+        yield pdf_bytes()
+    async def run():
+        return await DocumentParser().extract(stream(), "PDF", False)
+    assert asyncio.run(run(), loop_factory=asyncio.SelectorEventLoop).status == "EXTRACTED"
+
+
+@pytest.mark.parametrize("stop", ["cancel", "deadline"])
+def test_threaded_spawn_cancellation_retains_and_reaps_child(monkeypatch, stop):
+    original = subprocess.Popen
+    main_thread = threading.get_ident()
+    entered, release = threading.Event(), threading.Event()
+    children = []
+
+    async def unsupported(*args, **kwargs):
+        raise NotImplementedError
+
+    def delayed_spawn(args, **kwargs):
+        assert threading.get_ident() != main_thread
+        entered.set()
+        if not release.wait(5):
+            raise RuntimeError("Test did not release spawn")
+        child = original([sys.executable, "-c", "import time; time.sleep(10)"], **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", unsupported)
+    monkeypatch.setattr(subprocess, "Popen", delayed_spawn)
+
+    async def stream():
+        yield pdf_bytes()
+
+    async def run():
+        parser = DocumentParser(timeout_seconds=0.05 if stop == "deadline" else 5, max_concurrency=1)
+        active = asyncio.create_task(parser.extract(stream(), "PDF", False))
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            if stop == "cancel":
+                active.cancel()
+                await asyncio.sleep(0.02)
+            else:
+                await asyncio.sleep(0.1)
+            # The loop remains responsive, but cancellation must wait for ownership.
+            assert not active.done()
+            assert parser._slots._value == 0
+            release.set()
+            expected = asyncio.CancelledError if stop == "cancel" else ExtractionError
+            with pytest.raises(expected) as error:
+                await asyncio.wait_for(active, 3)
+            if stop == "deadline":
+                assert error.value.code == "DOCUMENT_TIMEOUT"
+            assert len(children) == 1 and children[0].poll() is not None
+            assert parser._slots._value == 1
+            monkeypatch.setattr(subprocess, "Popen", original)
+            parser.timeout_seconds = 10
+            assert (await parser.extract(stream(), "PDF", False)).status == "EXTRACTED"
+        finally:
+            release.set()
+            if not active.done():
+                active.cancel()
+            await asyncio.gather(active, return_exceptions=True)
+
+    asyncio.run(run())
 
 
 def test_parser_child_receives_only_minimal_environment(monkeypatch):

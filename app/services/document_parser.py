@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
 import sys
 import tempfile
 from collections.abc import AsyncIterator
@@ -21,6 +22,23 @@ class ExtractionError(Exception):
         self.code = code
         self.status = status
         super().__init__(code)
+
+
+class ThreadedProcess:
+    """Child process waited in a thread when the event loop cannot spawn subprocesses."""
+
+    def __init__(self, process: subprocess.Popen[bytes]) -> None:
+        self._process = process
+
+    @property
+    def returncode(self) -> int | None:
+        return self._process.poll()
+
+    def kill(self) -> None:
+        self._process.kill()
+
+    async def wait(self) -> int:
+        return await asyncio.to_thread(self._process.wait)
 
 
 class DocumentParser:
@@ -64,22 +82,38 @@ class DocumentParser:
                     handle.write(block)
             if not size:
                 raise ExtractionError("DOCUMENT_INVALID")
+            args = (
+                sys.executable, "-m", "app.services.document_parser_worker",
+                str(source), str(output), source_type, str(include_notes).lower(),
+            )
+            options = {
+                "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
+                "cwd": str(Path(__file__).resolve().parents[2]),
+                "env": {"PYTHONUTF8": "1", **{
+                    name: os.environ[name]
+                    for name in ("SystemRoot", "WINDIR", "TEMP", "TMP")
+                    if name in os.environ
+                }},
+            }
+            process: asyncio.subprocess.Process | ThreadedProcess
+            cancelled = False
             try:
-                process = await asyncio.create_subprocess_exec(
-                    sys.executable, "-m", "app.services.document_parser_worker",
-                    str(source), str(output), source_type, str(include_notes).lower(),
-                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-                    cwd=str(Path(__file__).resolve().parents[2]),
-                    env={"PYTHONUTF8": "1", **{
-                        name: os.environ[name]
-                        for name in ("SystemRoot", "WINDIR", "TEMP", "TMP")
-                        if name in os.environ
-                    }},
-                )
+                process = await asyncio.create_subprocess_exec(*args, **options)
             except NotImplementedError:
-                logger.warning("document_subprocess_unsupported_loop")
-                raise ExtractionError("DOCUMENT_PROCESS_FAILED", 503) from None
+                # e.g. uvicorn --reload on Windows runs a SelectorEventLoop.
+                logger.info("document_subprocess_thread_fallback")
+                spawn = asyncio.create_task(asyncio.to_thread(subprocess.Popen, args, **options))
+                # A cancelled await cannot stop Popen's thread. Retain ownership
+                # until it returns so the existing cleanup can kill/reap the child.
+                while True:
+                    try:
+                        process = ThreadedProcess(await asyncio.shield(spawn))
+                        break
+                    except asyncio.CancelledError:
+                        cancelled = True
             try:
+                if cancelled:
+                    raise asyncio.CancelledError
                 await process.wait()
             finally:
                 if process.returncode is None:

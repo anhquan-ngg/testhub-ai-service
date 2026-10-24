@@ -145,8 +145,11 @@ class VectorRepository:
         """Keep a tombstone so a late prepare cannot resurrect a revoked index."""
         async with self.pool.connection() as db:
             await db.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (str(command.index_id),))
-            existing = await (await db.execute("SELECT owner_id FROM rag.document_indexes WHERE id=%s", (command.index_id,))).fetchone()
-            if existing and existing["owner_id"] != command.scope.owner_id:
+            existing = await (await db.execute("""SELECT profile_id,owner_id,topic_id,chapter_id,document_id,version_id
+                FROM rag.document_indexes WHERE id=%s""", (command.index_id,))).fetchone()
+            if existing and (existing["profile_id"] != command.profile_id or any(
+                existing[field] != value for field, value in command.scope.model_dump().items()
+            )):
                 raise RagError("RAG_SCOPE_UNAVAILABLE", 404)
             await db.execute("INSERT INTO rag.revoked_indexes(index_id,owner_id,profile_id) VALUES(%s,%s,%s) ON CONFLICT DO NOTHING",
                 (command.index_id, command.scope.owner_id, command.profile_id))

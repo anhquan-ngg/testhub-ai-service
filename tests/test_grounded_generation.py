@@ -140,3 +140,60 @@ def test_post_llm_scope_check_sanitizes_failure_and_has_own_deadline(context, mo
     assert response.json() == {"detail": {"code": code, "retryable": True}}
     assert "PRIVATE" not in response.text
     assert provider.calls == 1
+
+
+def test_grounded_question_configs_follow_requested_order(context):
+    client,provider,_,_,body,headers,_=context
+    def change(value):
+        single=value["questions"][0]
+        multiple={**single,"question_text":"Which statements describe a stack?",
+            "options":[{"text":text,"isCorrect":i<2} for i,text in enumerate(["LIFO","Last in first out","FIFO","Sorted"])]}
+        value["questions"]=[multiple,single]
+        return value
+    provider.change=change
+    configs=[{"question_type":"MULTIPLE_CHOICE","question_format":"UNDERSTANDING","count":1},
+             {"question_type":"SINGLE_CHOICE","question_format":"KNOWLEDGE","count":1}]
+    legacy={k:v for k,v in body.items() if k not in ("count","question_format")}
+    response=client.post("/internal/rag/generate",headers=headers,json={**legacy,"question_configs":configs})
+    assert response.status_code==200,response.text
+    assert [(q["question_type"],q["question_format"]) for q in response.json()["questions"]]==[
+        ("MULTIPLE_CHOICE","UNDERSTANDING"),("SINGLE_CHOICE","KNOWLEDGE")]
+    # A swapped answer pattern violates the requested slot types and is rejected.
+    provider.change=lambda value:{"questions":list(reversed(change(value)["questions"]))}
+    response=client.post("/internal/rag/generate",headers=headers,json={**legacy,"question_configs":configs})
+    assert response.status_code==502 and response.json()["detail"]["code"]=="RAG_OUTPUT_INVALID"
+    assert client.post("/internal/rag/generate",headers=headers,json={**body,"question_configs":configs}).status_code==422
+
+
+def test_quote_drift_maps_to_exact_source_span(context):
+    client,provider,_,_,body,headers,_=context
+    def change(value):
+        citation=value["questions"][0]["citations"][0]
+        citation["quote"]="  "+citation["quote"].replace(" ","\n  ")+" "
+        return value
+    provider.change=change
+    response=client.post("/internal/rag/generate",headers=headers,json=body)
+    assert response.status_code==200,response.text
+    assert response.json()["questions"][0]["citations"][0]["quote"]==SOURCE
+
+
+@pytest.mark.parametrize("quote,text,expected",[
+    ("LIFO","Stack uses LIFO.","LIFO"),
+    ("Ngăn xếp hoạt động theo nguyên tắc LIFO","Ngăn xếp hoạt động theo\nnguyên tắc  LIFO.","Ngăn xếp hoạt động theo\nnguyên tắc  LIFO"),
+    ("Ngăn xếp","__NFD__Ngăn xếp dùng LIFO","__NFD__Ngăn xếp"),
+    ("hoat dong","Ngăn xếp hoạt động",None),
+    ("Ng","Ngăn","Ng"),
+    ("Nga","Ngăn",None),
+    ("   ","Ngăn",None),
+    ("FIFO","Stack uses LIFO.",None),
+])
+def test_locate_quote(quote,text,expected):
+    import unicodedata
+    from app.services.question_generator import locate_quote
+    if text.startswith("__NFD__"):
+        text=unicodedata.normalize("NFD",text[7:])
+        expected=unicodedata.normalize("NFD",expected[7:])
+    result=locate_quote(quote,text)
+    assert result==expected
+    if result is not None:
+        assert result in text
