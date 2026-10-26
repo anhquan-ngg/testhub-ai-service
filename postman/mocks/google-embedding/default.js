@@ -7,9 +7,17 @@ http.createServer(async (req, res) => {
 
   if(req.url.endsWith(':generateContent')){
     const prompt=input.contents[0].parts[0].text;
-    const data=JSON.parse(prompt.split('Reference JSON follows:\n')[1]);
-    const source=data.excerpts[0];
-    const output={questions:[{question_text:'Which ordering principle does a stack use?',options:['LIFO','FIFO','Random','Sorted'].map((text,i)=>({text,isCorrect:i===0})),citations:[{chunk_id:source.chunk_id,quote:source.text.slice(0,100)}]}]};
+    const planned=prompt.includes('Slots:\n');
+    const data=JSON.parse(prompt.split(planned?'Slots:\n':'Reference JSON follows:\n')[1]);
+    const slots=planned?data:[{excerpts:data.excerpts,correct_option_count:1}];
+    const output={questions:slots.map((slot,index)=>{
+      const source=slot.excerpts[0];
+      const invalid=(slot.objective||'').includes('fixture-invalid-answers');
+      const correct=invalid?1:slot.correct_option_count;
+      const citations=[{chunk_id:source.chunk_id,quote:source.text.slice(0,100)}];
+      if((slot.objective||'').includes('fixture-duplicate-citations')) citations.push({...citations[0]});
+      return {question_text:`Question ${index+1}: which statements describe a stack?`,options:['LIFO','Last in first out','FIFO','Sorted'].map((text,i)=>({text,isCorrect:i<correct})),citations};
+    })};
     res.writeHead(200,{'Content-Type':'application/json'});
     res.end(JSON.stringify({candidates:[{content:{parts:[{text:JSON.stringify(output)}],role:'model'},finishReason:'STOP'}]}));return;
   }

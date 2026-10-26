@@ -34,9 +34,14 @@ class VectorRepository:
         await self.pool.close(timeout=5)
 
     async def ready(self) -> bool:
+        """Require both migrations and the nullable chapter column used by topic-owned sources."""
         async with self.pool.connection() as db:
-            row = await (await db.execute("SELECT version FROM rag.schema_migrations WHERE version=1")).fetchone()
-            return row is not None
+            row = await (await db.execute("""SELECT
+                (SELECT count(*) FROM rag.schema_migrations WHERE version IN (1,2))=2
+                AND EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_schema='rag' AND table_name='document_indexes'
+                    AND column_name='chapter_id' AND is_nullable='YES') AS ready""")).fetchone()
+            return bool(row and row["ready"])
 
     @staticmethod
     def scope_values(command: IndexCommand) -> tuple:
@@ -45,7 +50,7 @@ class VectorRepository:
 
     async def _scoped(self, db, command: IndexCommand, *, lock=False) -> dict:
         sql = """SELECT * FROM rag.document_indexes WHERE id=%s AND profile_id=%s
-          AND owner_id=%s AND topic_id=%s AND chapter_id=%s AND document_id=%s AND version_id=%s"""
+          AND owner_id=%s AND topic_id=%s AND chapter_id IS NOT DISTINCT FROM %s AND document_id=%s AND version_id=%s"""
         if lock:
             sql += " FOR UPDATE"
         row = await (await db.execute(sql, self.scope_values(command))).fetchone()
@@ -130,7 +135,7 @@ class VectorRepository:
             if {row["id"] for row in rows} != set(indexes):
                 raise RagError("RAG_SCOPE_UNAVAILABLE", 404)
 
-    async def search(self, owner: UUID, profile: str, indexes: list[UUID], vector: list[float]) -> list[dict]:
+    async def search(self, owner: UUID, profile: str, indexes: list[UUID], vector: list[float], source_units: list[dict] | None = None) -> list[dict]:
         """Exact cosine search with authorization filters applied inside SQL."""
         async with self.pool.connection() as db:
             return await (await db.execute("""SELECT c.id AS chunk_id,c.ordinal,c.kind,c.position,
@@ -138,8 +143,23 @@ class VectorRepository:
                 i.version_id,i.source_sha256,1-(c.embedding <=> %s::public.vector) AS similarity
                 FROM rag.chunks c JOIN rag.document_indexes i ON i.id=c.index_id
                 WHERE i.id=ANY(%s) AND i.owner_id=%s AND i.profile_id=%s AND i.status='READY'
-                AND c.embedding IS NOT NULL ORDER BY c.embedding <=> %s::public.vector,c.id LIMIT 40""",
-                (json.dumps(vector), indexes, owner, profile, json.dumps(vector)))).fetchall()
+                AND c.embedding IS NOT NULL
+                AND (%s::jsonb IS NULL OR EXISTS (SELECT 1 FROM jsonb_to_recordset(%s::jsonb) AS u(index_id uuid,kind text,position integer)
+                  WHERE u.index_id=c.index_id AND u.kind=c.kind AND u.position=c.position))
+                ORDER BY c.embedding <=> %s::public.vector,c.id LIMIT 40""",
+                (json.dumps(vector), indexes, owner, profile,
+                 json.dumps(source_units) if source_units is not None else None,
+                 json.dumps(source_units) if source_units is not None else None, json.dumps(vector)))).fetchall()
+
+    async def outline_chunks(self, owner: UUID, profile: str, index_id: UUID) -> list[dict]:
+        """Read the full authorized chunk manifest, not an eight-chunk retrieval sample."""
+        await self.validate_scope(owner, profile, [index_id])
+        async with self.pool.connection() as db:
+            return await (await db.execute("""SELECT c.kind,c.position,c.start_offset,c.end_offset,c.text,
+                i.document_id,i.version_id,i.source_sha256 FROM rag.chunks c
+                JOIN rag.document_indexes i ON i.id=c.index_id
+                WHERE i.id=%s AND i.owner_id=%s AND i.profile_id=%s AND i.status='READY'
+                ORDER BY c.ordinal LIMIT 5001""", (index_id, owner, profile))).fetchall()
 
     async def revoke(self, command: IndexCommand) -> None:
         """Keep a tombstone so a late prepare cannot resurrect a revoked index."""

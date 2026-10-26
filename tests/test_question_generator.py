@@ -121,7 +121,7 @@ def test_question_configs_reject_answers_for_the_wrong_slot_type(answers) -> Non
 @pytest.mark.parametrize("change", [
     {"question_configs": [{"question_type": "ESSAY", "question_format": "KNOWLEDGE", "count": 1}]},
     {"question_configs": [{"question_type": "SINGLE_CHOICE", "question_format": "KNOWLEDGE", "count": 11}] * 2},
-    {"question_configs": [{"question_type": "SINGLE_CHOICE", "question_format": "KNOWLEDGE", "count": 1}] * 11},
+    {"question_configs": [{"question_type": "SINGLE_CHOICE", "question_format": "KNOWLEDGE", "count": 1}] * 21},
     {"question_configs": []},
     {"question_configs": [{"question_type": "SINGLE_CHOICE", "question_format": "KNOWLEDGE", "count": 1}],
      "count": 1},

@@ -1,5 +1,22 @@
 # AGENTS.md — testhub-ai-service
 
+## Source-wide knowledge plans (2026-10-25)
+
+- POST /internal/rag/outline reconstructs all authorized chunks, recognizes numbered chapter/section headings and proposes inferred page topics when no outline exists. These are editable heuristics, not validated semantic classifications.
+- Normalize numeric slide-continuation suffixes `(n)` for both topic names and
+  identity keys. Union source units; retain first-title evidence. Keep distinct
+  section codes/parents and nonnumeric qualifiers separate; never rewrite saved
+  plans or bank chapters when outline heuristics change.
+- GroundedGenerateRequest.plan_items binds each cognitive cell to an objective and source units. SQL filters allowed units BEFORE nearest-neighbor LIMIT; missing cell evidence fails rather than substituting another topic.
+- One provider invocation receives isolated ordered slot contexts. Validate each quote against that slot only and assign plan_item_id server-side. Recheck authorization after I/O.
+- Validate every raw citation before consolidating repeated chunk IDs into one
+  contiguous source span <=600 characters; never drop unsupported duplicate
+  quotes or lose cited evidence to satisfy backend uniqueness. Planned schema,
+  scope and quote failures log only reason/mode/slot metadata.
+- Apply new manual migration migrations/002_optional_document_chapter.sql before topic-owned document indexing; old migrations remain unchanged.
+- Config rows now max20 / total questions max20. Keep exported RAG OpenAPI in sync. CONTINUITY.md is local and ignored/untracked.
+
+
 ## Question configs for generation (2026-10-23)
 
 - GenerateRequest and GroundedGenerateRequest share QuestionBlueprint: either
@@ -9,6 +26,10 @@
 - Prompts list one slot per question; check_slots validates count and the
   correct-option rule per position (single: exactly 1; multiple: 2-3 of 4).
   Output type/format come from the slot, never from the model.
+- All generation prompts include numeric option/correct/distractor budgets per
+  slot (target 1/3 for single, 2/2 for multiple); the SDK schema requires 4 options.
+  Keep the 2-3 correct-option validator for multiple-choice compatibility. Answer
+  failures log only slot/type/count metadata, never answer text or provider JSON.
 - Both text-generation.v1 fixtures now use question_configs; keep them identical.
   RAG OpenAPI was regenerated. ESSAY generation is not supported.
 
@@ -37,7 +58,9 @@
 - Parser subprocesses receive only PYTHONUTF8 and the OS/temp variables needed
   for startup; never inherit provider keys, DB URLs or PYTHONPATH. Loops without
   subprocess support (uvicorn --reload on Windows uses SelectorEventLoop) fall
-  back to subprocess.Popen waited in a thread, still killed on deadline/cancel.
+  back to subprocess.Popen spawned/waited in a thread. Cancellation during spawn
+  returns promptly and transfers child/temp-file ownership to a tracked cleanup
+  task; hold the intake slot until late spawn cleanup finishes.
 
 ## Current RAG implementation (2026-10-21)
 
@@ -55,6 +78,8 @@
   Never silently change model/dimensions/profile or reset paid-call budgets.
 - Only READY owner/profile/index scopes are searchable. Keep full-scope pre/post
   checks, SQL filters, tombstones and fenced leases. Python never writes bank data.
+- Retrieval source_units identify index_id/kind/position together. Plan/outline
+  source units stay kind/position because the enclosing plan pins one index.
 - On Windows, parser subprocesses use asyncio on Proactor loops and the threaded
   Popen fallback on selector loops; the psycopg pool runs on an owned selector-loop thread. Readiness checks DB schema, not Google.
 - Setup/API/limits: [backend RAG guide](https://github.com/anhquan-ngg/testhub-v2-backend/blob/master/docs/rag-indexing.md).

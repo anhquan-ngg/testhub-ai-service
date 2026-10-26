@@ -195,3 +195,46 @@ def test_selector_bridge_owns_db_loop_and_closes():
 def test_rag_openapi_contract_does_not_drift():
     from scripts.export_document_contract import document_contract, ROOT
     assert json.loads((ROOT/"contracts/rag-indexing.openapi.json").read_text(encoding="utf-8"))==document_contract("/internal/rag/")
+
+
+def test_source_unit_filter_pins_index_even_when_pages_match():
+    async def run():
+        repo, embedding = AsyncMock(), AsyncMock()
+        embedding.embed.return_value = [[1.] + [0.] * 767]
+        first, second = uuid4(), uuid4()
+        req = RetrieveRequest(owner_id=uuid4(), profile_id=current_profile().profile_id,
+            index_ids=[first, second], query="LIFO", source_units=[
+                {"index_id": str(second), "kind": "PAGE", "position": 1},
+            ])
+        chunk = chunk_document(first, source())[0]
+        common = {**chunk.model_dump(), "document_id": uuid4(), "version_id": uuid4(),
+            "source_sha256": "a" * 64, "similarity": .9}
+        repo.search.return_value = [{**common, "index_id": first}, {**common, "index_id": second}]
+        result = await RagService(repo, embedding).run("retrieve", req)
+        assert [item.index_id for item in result.chunks] == [second]
+        assert repo.search.call_args.kwargs["source_units"] == [
+            {"index_id": str(second), "kind": "PAGE", "position": 1},
+        ]
+        # Filtering remains optional; omitting identity within a supplied filter is invalid.
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError):
+            RetrieveRequest.model_validate({**req.model_dump(), "source_units": [{"kind": "PAGE", "position": 1}]})
+    asyncio.run(run())
+
+
+def test_sql_source_unit_filter_includes_index_identity():
+    from app.repositories.vector_repository import VectorRepository
+    from unittest.mock import MagicMock
+    async def run():
+        db = AsyncMock()
+        db.execute.return_value.fetchall.return_value = []
+        repository = object.__new__(VectorRepository)
+        repository.pool = MagicMock()
+        repository.pool.connection.return_value.__aenter__.return_value = db
+        index = uuid4()
+        units = [{"index_id": str(index), "kind": "PAGE", "position": 1}]
+        await repository.search(uuid4(), current_profile().profile_id, [index], [1.] + [0.] * 767, units)
+        sql, params = db.execute.call_args.args
+        assert "u.index_id=c.index_id" in sql and "u(index_id uuid,kind text,position integer)" in sql
+        assert json.loads(params[4]) == units and json.loads(params[5]) == units
+    asyncio.run(run())

@@ -2,6 +2,7 @@
 
 import asyncio
 import io
+from pathlib import Path
 import subprocess
 import sys
 import threading
@@ -275,20 +276,25 @@ def test_windows_selector_loop_extracts_like_uvicorn_reload():
 
 
 @pytest.mark.parametrize("stop", ["cancel", "deadline"])
-def test_threaded_spawn_cancellation_retains_and_reaps_child(monkeypatch, stop):
+@pytest.mark.parametrize("spawn_fails", [False, True])
+def test_threaded_spawn_cancellation_retains_and_reaps_child(monkeypatch, caplog, stop, spawn_fails):
     original = subprocess.Popen
     main_thread = threading.get_ident()
     entered, release = threading.Event(), threading.Event()
     children = []
+    folders = []
 
     async def unsupported(*args, **kwargs):
         raise NotImplementedError
 
     def delayed_spawn(args, **kwargs):
         assert threading.get_ident() != main_thread
+        folders.append(Path(args[4]).parent)
         entered.set()
         if not release.wait(5):
             raise RuntimeError("Test did not release spawn")
+        if spawn_fails:
+            raise OSError("PRIVATE spawn details")
         child = original([sys.executable, "-c", "import time; time.sleep(10)"], **kwargs)
         children.append(child)
         return child
@@ -309,17 +315,26 @@ def test_threaded_spawn_cancellation_retains_and_reaps_child(monkeypatch, stop):
                 await asyncio.sleep(0.02)
             else:
                 await asyncio.sleep(0.1)
-            # The loop remains responsive, but cancellation must wait for ownership.
-            assert not active.done()
-            assert parser._slots._value == 0
-            release.set()
             expected = asyncio.CancelledError if stop == "cancel" else ExtractionError
             with pytest.raises(expected) as error:
-                await asyncio.wait_for(active, 3)
+                await asyncio.wait_for(active, 0.5)
             if stop == "deadline":
                 assert error.value.code == "DOCUMENT_TIMEOUT"
-            assert len(children) == 1 and children[0].poll() is not None
+            # Request finishes before the spawning thread returns. Cleanup still
+            # owns the files and slot, preventing unlimited abandoned spawns.
+            assert not children and parser._cleanup_tasks
+            assert folders[0].exists() and parser._slots._value == 0
+            release.set()
+            await asyncio.wait_for(asyncio.gather(*parser._cleanup_tasks, return_exceptions=True), 3)
+            await asyncio.sleep(0)
+            if spawn_fails:
+                assert not children
+                assert "document_spawn_cleanup_failed error_type=OSError" in caplog.text
+                assert "PRIVATE" not in caplog.text
+            else:
+                assert len(children) == 1 and children[0].poll() is not None
             assert parser._slots._value == 1
+            assert not parser._cleanup_tasks and not folders[0].exists()
             monkeypatch.setattr(subprocess, "Popen", original)
             parser.timeout_seconds = 10
             assert (await parser.extract(stream(), "PDF", False)).status == "EXTRACTED"
@@ -328,6 +343,7 @@ def test_threaded_spawn_cancellation_retains_and_reaps_child(monkeypatch, stop):
             if not active.done():
                 active.cancel()
             await asyncio.gather(active, return_exceptions=True)
+            await asyncio.gather(*parser._cleanup_tasks, return_exceptions=True)
 
     asyncio.run(run())
 

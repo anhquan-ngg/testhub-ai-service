@@ -45,18 +45,46 @@ class DocumentParser:
     def __init__(self, *, timeout_seconds: float = 45, max_concurrency: int = 2) -> None:
         self.timeout_seconds = timeout_seconds
         self._slots = asyncio.Semaphore(max_concurrency)
+        self._cleanup_tasks: set[asyncio.Task[None]] = set()
+
+    async def _cleanup_spawn(
+        self, spawn: asyncio.Task[subprocess.Popen[bytes]], folder: tempfile.TemporaryDirectory[str],
+    ) -> None:
+        """Own a late spawn until its child can be killed/reaped and files removed."""
+        try:
+            while True:
+                try:
+                    process = ThreadedProcess(await asyncio.shield(spawn))
+                    break
+                except asyncio.CancelledError:
+                    # Cleanup ownership must survive cancellation of its supervisor.
+                    if spawn.cancelled():
+                        raise
+                    continue
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+        finally:
+            folder.cleanup()
+
+    def _cleanup_finished(self, task: asyncio.Task[None]) -> None:
+        self._cleanup_tasks.discard(task)
+        self._slots.release()
+        if not task.cancelled() and task.exception() is not None:
+            logger.warning("document_spawn_cleanup_failed error_type=%s", type(task.exception()).__name__)
 
     async def extract(
         self, stream: AsyncIterator[bytes], source_type: str, include_notes: bool,
     ) -> ExtractionResult:
-        """Bound upload and parsing by one deadline, releasing capacity on cancellation."""
+        """Bound request time; retain capacity for any late spawn until cleanup completes."""
         try:
             await asyncio.wait_for(self._slots.acquire(), 0.1)
         except TimeoutError:
             raise ExtractionError("DOCUMENT_CAPACITY_REACHED", 503) from None
+        cleanup: list[asyncio.Task[None]] = []
         try:
             return await asyncio.wait_for(
-                self._extract(stream, source_type, include_notes), self.timeout_seconds,
+                self._extract(stream, source_type, include_notes, cleanup), self.timeout_seconds,
             )
         except TimeoutError:
             raise ExtractionError("DOCUMENT_TIMEOUT", 504) from None
@@ -66,13 +94,16 @@ class DocumentParser:
             logger.warning("document_processing_failed error_type=%s", type(exc).__name__)
             raise ExtractionError("DOCUMENT_PROCESS_FAILED", 503) from None
         finally:
-            self._slots.release()
+            if not cleanup:
+                self._slots.release()
 
     async def _extract(
         self, stream: AsyncIterator[bytes], source_type: str, include_notes: bool,
+        cleanup: list[asyncio.Task[None]],
     ) -> ExtractionResult:
-        with tempfile.TemporaryDirectory(prefix="testhub-document-") as folder:
-            source, output = Path(folder) / "source", Path(folder) / "result.json"
+        folder = tempfile.TemporaryDirectory(prefix="testhub-document-")
+        try:
+            source, output = Path(folder.name) / "source", Path(folder.name) / "result.json"
             size = 0
             with source.open("wb") as handle:
                 async for block in stream:
@@ -96,24 +127,21 @@ class DocumentParser:
                 }},
             }
             process: asyncio.subprocess.Process | ThreadedProcess
-            cancelled = False
             try:
                 process = await asyncio.create_subprocess_exec(*args, **options)
             except NotImplementedError:
                 # e.g. uvicorn --reload on Windows runs a SelectorEventLoop.
                 logger.info("document_subprocess_thread_fallback")
                 spawn = asyncio.create_task(asyncio.to_thread(subprocess.Popen, args, **options))
-                # A cancelled await cannot stop Popen's thread. Retain ownership
-                # until it returns so the existing cleanup can kill/reap the child.
-                while True:
-                    try:
-                        process = ThreadedProcess(await asyncio.shield(spawn))
-                        break
-                    except asyncio.CancelledError:
-                        cancelled = True
+                try:
+                    process = ThreadedProcess(await asyncio.shield(spawn))
+                except asyncio.CancelledError:
+                    task = asyncio.create_task(self._cleanup_spawn(spawn, folder))
+                    cleanup.append(task)
+                    self._cleanup_tasks.add(task)
+                    task.add_done_callback(self._cleanup_finished)
+                    raise
             try:
-                if cancelled:
-                    raise asyncio.CancelledError
                 await process.wait()
             finally:
                 if process.returncode is None:
@@ -131,3 +159,6 @@ class DocumentParser:
                 return ExtractionResult.model_validate_json(raw)
             except (ValueError, TypeError):
                 raise ExtractionError("DOCUMENT_PROCESS_FAILED") from None
+        finally:
+            if not cleanup:
+                folder.cleanup()

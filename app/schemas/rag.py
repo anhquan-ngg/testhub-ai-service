@@ -55,7 +55,7 @@ def current_profile() -> IndexProfile:
 class IndexScope(StrictModel):
     owner_id: Uuid
     topic_id: Uuid
-    chapter_id: Uuid
+    chapter_id: Uuid | None
     document_id: Uuid
     version_id: Uuid
 
@@ -103,12 +103,22 @@ class Chunk(StrictModel):
         return self
 
 
+class SourceUnit(StrictModel):
+    kind: Literal["PAGE", "SLIDE", "NOTES"]
+    position: int = Field(ge=1, le=500)
+
+
+class RetrievalSourceUnit(SourceUnit):
+    index_id: Uuid
+
+
 class RetrieveRequest(StrictModel):
     owner_id: Uuid
     profile_id: Hash
     index_ids: list[Uuid] = Field(min_length=1, max_length=10)
     query: str = Field(min_length=1, max_length=1000)
     top_k: int = Field(default=6, ge=1, le=8)
+    source_units: list[RetrievalSourceUnit] | None = Field(default=None, min_length=1, max_length=1000)
 
     @field_validator("query")
     @classmethod

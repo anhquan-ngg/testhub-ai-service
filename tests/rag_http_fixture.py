@@ -18,8 +18,8 @@ class Repository:
     async def release(self,*args):pass
     async def validate_scope(self,owner,profile,indexes):
         if any(i not in self.rows or self.rows[i]["scope"].owner_id!=owner or self.rows[i]["profile_id"]!=profile or self.rows[i]["status"]!="READY" for i in indexes):raise RagError("RAG_SCOPE_UNAVAILABLE",404)
-    async def search(self,owner,profile,indexes,vector):
-        return [{**c.model_dump(),"index_id":i,"document_id":self.rows[i]["scope"].document_id,"version_id":self.rows[i]["scope"].version_id,"source_sha256":self.rows[i]["hash"],"similarity":1.} for i in indexes for c in self.chunks[i]]
+    async def search(self,owner,profile,indexes,vector,source_units=None):
+        return [{**c.model_dump(),"index_id":i,"document_id":self.rows[i]["scope"].document_id,"version_id":self.rows[i]["scope"].version_id,"source_sha256":self.rows[i]["hash"],"similarity":1.} for i in indexes for c in self.chunks[i] if source_units is None or {"index_id":str(i),"kind":c.kind,"position":c.position} in source_units]
     async def revoke(self,request):
         self.revoked.add(request.index_id)
         if request.index_id in self.rows:self.rows[request.index_id]["status"]="REVOKED"

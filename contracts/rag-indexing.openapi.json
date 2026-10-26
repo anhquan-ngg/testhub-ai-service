@@ -145,6 +145,146 @@
         }
       }
     },
+    "/internal/rag/outline": {
+      "post": {
+        "tags": [
+          "rag"
+        ],
+        "summary": "Outline",
+        "description": "Inspect every authorized source unit without a paid planning invocation.",
+        "operationId": "outline_internal_rag_outline_post",
+        "parameters": [
+          {
+            "name": "x-internal-token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Internal-Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OutlineRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OutlineResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Internal token missing or invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Authorized source scope unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "Request body intake timed out",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Profile, index or lease conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Actual request body byte limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid input, source or insufficient context",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Invalid provider output or provider configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Capacity, authentication configuration, storage or provider unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "RAG or generation deadline exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/internal/rag/profile": {
       "get": {
         "tags": [
@@ -945,7 +1085,7 @@
                   "$ref": "#/components/schemas/QuestionConfig"
                 },
                 "type": "array",
-                "maxItems": 10,
+                "maxItems": 20,
                 "minItems": 1
               },
               {
@@ -986,6 +1126,38 @@
             "minimum": 1.0,
             "title": "Top K",
             "default": 6
+          },
+          "source_units": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/RetrievalSourceUnit"
+                },
+                "type": "array",
+                "maxItems": 1000,
+                "minItems": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Units"
+          },
+          "plan_items": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/PlanItem"
+                },
+                "type": "array",
+                "maxItems": 20,
+                "minItems": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Plan Items"
           }
         },
         "additionalProperties": false,
@@ -1072,6 +1244,19 @@
             "maxItems": 3,
             "minItems": 1,
             "title": "Citations"
+          },
+          "plan_item_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Plan Item Id"
           }
         },
         "additionalProperties": false,
@@ -1197,8 +1382,15 @@
             "title": "Topic Id"
           },
           "chapter_id": {
-            "type": "string",
-            "format": "uuid",
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Chapter Id"
           },
           "document_id": {
@@ -1222,6 +1414,224 @@
           "version_id"
         ],
         "title": "IndexScope"
+      },
+      "OutlineNode": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "parent_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Id"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "source_units": {
+            "items": {
+              "$ref": "#/components/schemas/SourceUnit"
+            },
+            "type": "array",
+            "maxItems": 1000,
+            "minItems": 1,
+            "title": "Source Units"
+          },
+          "origin": {
+            "type": "string",
+            "enum": [
+              "HEADING",
+              "INFERRED"
+            ],
+            "title": "Origin"
+          },
+          "evidence": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Evidence"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "parent_id",
+          "name",
+          "source_units",
+          "origin",
+          "evidence"
+        ],
+        "title": "OutlineNode"
+      },
+      "OutlineRequest": {
+        "properties": {
+          "owner_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Owner Id"
+          },
+          "index_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Index Id"
+          },
+          "profile_id": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Profile Id"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Title"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "owner_id",
+          "index_id",
+          "profile_id",
+          "title"
+        ],
+        "title": "OutlineRequest"
+      },
+      "OutlineResponse": {
+        "properties": {
+          "contract_version": {
+            "type": "string",
+            "const": "knowledge-outline.v1",
+            "title": "Contract Version",
+            "default": "knowledge-outline.v1"
+          },
+          "index_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Index Id"
+          },
+          "document_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Document Id"
+          },
+          "version_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Version Id"
+          },
+          "source_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Source Sha256"
+          },
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/OutlineNode"
+            },
+            "type": "array",
+            "maxItems": 1000,
+            "minItems": 1,
+            "title": "Nodes"
+          },
+          "source_units": {
+            "items": {
+              "$ref": "#/components/schemas/SourceUnit"
+            },
+            "type": "array",
+            "maxItems": 1000,
+            "minItems": 1,
+            "title": "Source Units"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 10,
+            "title": "Warnings"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "index_id",
+          "document_id",
+          "version_id",
+          "source_sha256",
+          "nodes",
+          "source_units",
+          "warnings"
+        ],
+        "title": "OutlineResponse"
+      },
+      "PlanItem": {
+        "properties": {
+          "question_type": {
+            "$ref": "#/components/schemas/QuestionType"
+          },
+          "question_format": {
+            "$ref": "#/components/schemas/QuestionFormat"
+          },
+          "count": {
+            "type": "integer",
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Count"
+          },
+          "id": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Id"
+          },
+          "knowledge_title": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Knowledge Title"
+          },
+          "objective": {
+            "type": "string",
+            "maxLength": 400,
+            "minLength": 1,
+            "title": "Objective"
+          },
+          "source_units": {
+            "items": {
+              "$ref": "#/components/schemas/SourceUnit"
+            },
+            "type": "array",
+            "maxItems": 1000,
+            "minItems": 1,
+            "title": "Source Units"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "question_type",
+          "question_format",
+          "count",
+          "id",
+          "knowledge_title",
+          "objective",
+          "source_units"
+        ],
+        "title": "PlanItem"
       },
       "PrepareIndexRequest": {
         "properties": {
@@ -1348,6 +1758,38 @@
         ],
         "title": "RagErrorResponse"
       },
+      "RetrievalSourceUnit": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "PAGE",
+              "SLIDE",
+              "NOTES"
+            ],
+            "title": "Kind"
+          },
+          "position": {
+            "type": "integer",
+            "maximum": 500.0,
+            "minimum": 1.0,
+            "title": "Position"
+          },
+          "index_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Index Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "position",
+          "index_id"
+        ],
+        "title": "RetrievalSourceUnit"
+      },
       "RetrieveRequest": {
         "properties": {
           "owner_id": {
@@ -1382,6 +1824,22 @@
             "minimum": 1.0,
             "title": "Top K",
             "default": 6
+          },
+          "source_units": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/RetrievalSourceUnit"
+                },
+                "type": "array",
+                "maxItems": 1000,
+                "minItems": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Units"
           }
         },
         "additionalProperties": false,
@@ -1577,6 +2035,32 @@
           "text"
         ],
         "title": "SourceSpan"
+      },
+      "SourceUnit": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "PAGE",
+              "SLIDE",
+              "NOTES"
+            ],
+            "title": "Kind"
+          },
+          "position": {
+            "type": "integer",
+            "maximum": 500.0,
+            "minimum": 1.0,
+            "title": "Position"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "position"
+        ],
+        "title": "SourceUnit"
       }
     }
   }
