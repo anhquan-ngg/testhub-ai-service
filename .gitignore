@@ -8,3 +8,6 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+
+# Local agent handoff notes (keep files, do not track)
+CONTINUITY.md

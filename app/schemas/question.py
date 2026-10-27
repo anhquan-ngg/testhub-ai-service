@@ -6,7 +6,7 @@ from typing import Annotated, NamedTuple, Self
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
 
 MAX_TOTAL_QUESTIONS = 20
-MAX_QUESTION_CONFIGS = 10
+MAX_QUESTION_CONFIGS = 20
 
 
 class QuestionFormat(str, Enum):
@@ -147,12 +147,13 @@ class GenerateResponse(BaseModel):
 # stricter RawQuestionList validators run on the returned JSON afterward.
 class GeminiOption(BaseModel):
     text: str
-    isCorrect: bool
+    isCorrect: bool = Field(description="JSON true only for a correct option supported by the source; false for a distractor. Obey the slot's correct_option_count.")
 
 
 class GeminiQuestion(BaseModel):
     question_text: str
-    options: list[GeminiOption]
+    options: list[GeminiOption] = Field(min_length=4, max_length=4,
+        description="Exactly four distinct options. Follow the requested slot's true/false counts; multiple-choice slots need multiple true flags.")
 
 
 class GeminiQuestionList(BaseModel):

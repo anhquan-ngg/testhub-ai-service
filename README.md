@@ -1,5 +1,19 @@
 # testhub-ai-service
 
+## Source-wide knowledge plans (2026-10-25)
+
+- POST /internal/rag/outline reconstructs all authorized chunks, recognizes numbered chapter/section headings and proposes inferred page topics when no outline exists. These are editable heuristics, not validated semantic classifications.
+- Repeated slide titles ending in numeric counters such as `Constructor method(2)`
+  or `Constructor method (3)` become one topic with the union of their source pages.
+  Numbered sections stay scoped to their section code/parent; named qualifiers
+  such as `(Java)` remain distinct. Existing saved plans are not rewritten: restart
+  the AI service and create a new plan to use the revised outline.
+- GroundedGenerateRequest.plan_items binds each cognitive cell to an objective and source units. SQL filters allowed units BEFORE nearest-neighbor LIMIT; missing cell evidence fails rather than substituting another topic.
+- One provider invocation receives isolated ordered slot contexts. Validate each quote against that slot only and assign plan_item_id server-side. Recheck authorization after I/O.
+- Apply new manual migration migrations/002_optional_document_chapter.sql before topic-owned document indexing; old migrations remain unchanged.
+- Config rows now max20 / total questions max20. Keep exported RAG OpenAPI in sync. CONTINUITY.md is local and ignored/untracked.
+
+
 ## Grounded document question generation (2026-10-23)
 
 - POST /internal/rag/generate implements rag-generation.v1, authenticated with the
@@ -180,6 +194,76 @@ deadline riêng (Python 45s, NestJS mặc định 55s).
 
 Test dùng provider giả lập và SDK thật với `httpx.MockTransport`, không cần key thật và không gọi mạng. Chúng kiểm tra contract, token ngoài ASCII, topic rỗng, JSON đầu ra, timeout, deadline/cancellation, concurrency, retry hữu hạn, vòng đời client và log an toàn. Lời gọi Gemini thật cần key hợp lệ; service không tự thực hiện smoke test thật.
 
+## Khắc phục lỗi RAG
+
+### Planned generation returns 502
+
+The access log alone does not identify the failure. Inspect the preceding
+`generation_invalid_output reason=... mode=planned slot=...` or `gemini_failure`
+line. Planned schema and citation failures now emit sanitized diagnostics;
+question text, quotes, provider output and credentials remain private.
+
+`reason=duplicate_citations` in an older process means the model repeated a
+chunk ID within one question, not that questions duplicate the bank. Generation
+now validates every supplied quote against the question's authorized chunks,
+then merges repeated references into one exact contiguous source span (<=600
+characters). Identical references are deduplicated; different quotes from the
+same chunk retain all cited evidence in the merged span. An unknown chunk,
+unsupported quote or combined span over 600 characters still fails the batch.
+The returned contract retains one citation per chunk; answers are not modified.
+
+Restart AI after updating code. For a stable demo, omit `--reload`; for editing,
+limit watching to `--reload --reload-dir app` so test edits do not restart it.
+If interrupted Windows reloads print KeyboardInterrupt/BrokenPipeError/EOFError,
+stop Uvicorn with Ctrl+C and start it again; that traceback alone does not explain
+an earlier generation 502. Wait for `Application startup complete`.
+
+To intentionally generate a new batch from an unchanged approved plan in the
+current UI, reload the browser page, reopen the plan and generate. Repeated
+clicks in one page session reuse its Idempotency-Key and can return the failed
+batch; reloading the plan alone does not reset that key. No reupload/migration
+is needed for this citation fix, and old failed batches retain their status.
+
+### RAG generation fails with reason=answers
+
+`generation_invalid_output reason=answers` means the returned JSON passed shape
+validation but a question's `isCorrect` count does not match its requested type.
+SINGLE_CHOICE requires one true; MULTIPLE_CHOICE accepts two or three, never zero,
+one or all four. This is model-output validation, not a database/key setup error.
+
+Prompts now give every ordered slot an explicit four-option budget, targeting
+one correct/three distractors for single choice and two correct/two distractors
+for multiple choice. The SDK schema also constrains options to exactly four.
+Validation still accepts three supported correct options for existing multiple
+choice results. It never changes answer flags or silently reissues a paid call.
+Sanitized diagnostics identify the first failing slot, for example:
+
+```text
+generation_invalid_output reason=answers slot=2 question_type=MULTIPLE_CHOICE correct_count=1 option_count=4
+```
+
+Restart the AI service after updating code, then open the approved plan again
+and create a new generation batch. Existing failed batches are not overwritten.
+Prompt constraints reduce ambiguity but do not guarantee correct model output;
+lecturer review and server-side validation remain required.
+
+### RAG prepare fails with NotNullViolation
+
+Topic-owned documents may not have a chapter until approved questions are
+committed. If the database still has `rag.document_indexes.chapter_id NOT NULL`,
+apply migration 002 to the confirmed local database as its schema owner:
+
+```powershell
+psql -h 127.0.0.1 -p 5432 -U testhub_ai -d testhub -W -v ON_ERROR_STOP=1 -f migrations/002_optional_document_chapter.sql
+```
+
+This preserves existing rows and allows a NULL chapter. Do not edit migration
+001 or invent a chapter ID. `/internal/rag/profile` does not check storage;
+`/ready` requires migrations 1/2 and the nullable chapter column. Restart the AI
+service after updating readiness code. Retry failed indexing from the document
+workspace; the original uploaded file need not be uploaded again. If a generation
+batch already failed, finish indexing before creating a new batch.
+
 ## Cấu trúc hiện có
 
 ```text
@@ -193,7 +277,7 @@ app/
 ├── services/{prompt_builder,question_generator,document_parser,document_parser_worker}.py
 ├── services/{chunking,embedding,retrieval,rag_errors,grounded_generation}.py
 └── repositories/{vector_repository,windows_pool}.py
-migrations/{000_bootstrap,001_rag}.sql
+migrations/{000_bootstrap,001_rag,002_optional_document_chapter}.sql
 contracts/{text-generation.v1,document-extraction.openapi,rag-indexing.openapi}.json
 scripts/{export_document_contract,export_rag_contract}.py
 tests/
@@ -206,4 +290,5 @@ Dockerfile
 Parser PDF/PPTX, chunking, Google embedding, pgvector, retrieval và sinh câu RAG có
 trích dẫn đã được triển khai. OCR và provider khác vẫn là bước sau. NestJS
 giữ quyền truy cập, metadata, batch, bản nháp và duyệt/commit. Xem
-[CONTINUITY.md](CONTINUITY.md) và hướng dẫn backend cho trạng thái/lệnh chạy.
+`CONTINUITY.md` local (nếu chưa có, tạo ghi chú trạng thái đã xác minh; file được
+gitignore, không thêm vào Git) và hướng dẫn backend cho trạng thái/lệnh chạy.

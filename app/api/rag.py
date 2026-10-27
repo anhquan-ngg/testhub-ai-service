@@ -1,6 +1,7 @@
 """Authenticated internal RAG commands; NestJS owns authorization and queueing."""
 
 import asyncio
+import logging
 
 from fastapi import APIRouter, Depends, Request, Response
 
@@ -11,6 +12,9 @@ from app.services.rag_errors import RagError
 from app.services.retrieval import RagService
 from app.services.grounded_generation import GroundedGeneration
 from app.schemas.grounded_generation import GroundedGenerateRequest, GroundedGenerateResponse
+from app.schemas.knowledge_plan import OutlineRequest, OutlineResponse
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/internal/rag", tags=["rag"], dependencies=[Depends(require_internal_token)], responses={
     status: {"model": RagErrorResponse, "description": description}
@@ -46,6 +50,32 @@ def get_grounded(request: Request) -> GroundedGeneration:
 async def generate(input: GroundedGenerateRequest,service: GroundedGeneration = Depends(get_grounded)) -> GroundedGenerateResponse:
     """Generate evidence-cited questions from fully scoped READY indexes."""
     return await service.generate(input)
+
+
+@router.post("/outline", response_model=OutlineResponse)
+async def outline(input: OutlineRequest, service: RagService = Depends(get_rag)) -> OutlineResponse:
+    """Inspect every authorized source unit without a paid planning invocation."""
+    from app.services.content_map import content_map
+    service.require_profile(input.profile_id)
+    try:
+        await asyncio.wait_for(service.slots.acquire(), .1)
+    except TimeoutError:
+        raise RagError("RAG_CAPACITY_REACHED", 503, True) from None
+    try:
+        async with asyncio.timeout(15):
+            chunks = await service.repository.outline_chunks(input.owner_id, input.profile_id, input.index_id)
+            result = await asyncio.to_thread(content_map, input.index_id, input.title, chunks)
+            await service.repository.validate_scope(input.owner_id, input.profile_id, [input.index_id])
+            return result
+    except RagError:
+        raise
+    except TimeoutError:
+        raise RagError("RAG_DEADLINE", 504, True) from None
+    except Exception as exc:
+        logger.warning("rag_outline_failed exception_type=%s", type(exc).__name__)
+        raise RagError("RAG_STORAGE_UNAVAILABLE", 503, True) from None
+    finally:
+        service.slots.release()
 
 
 @router.get("/profile", response_model=IndexProfile)

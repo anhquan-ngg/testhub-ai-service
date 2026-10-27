@@ -57,14 +57,14 @@ def test_grounded_http_exact_evidence_and_strict_contract(context):
     assert client.post("/internal/rag/generate",headers=headers,json={**body,"count":"1"}).status_code==422
     assert client.post("/internal/rag/generate",json=body).status_code==401
 
-@pytest.mark.parametrize("mode",["quote","chunk","duplicates","count","invalid-answer"])
+@pytest.mark.parametrize("mode",["quote","chunk","duplicate-invalid-quote","count","invalid-answer"])
 def test_reject_unsupported_evidence_without_retry(context,mode):
     client,provider,_,_,body,headers,_=context
     def change(value):
         question=value["questions"][0]
         if mode=="quote":question["citations"][0]["quote"]="PRIVATE fabricated evidence"
         if mode=="chunk":question["citations"][0]["chunk_id"]=str(uuid4())
-        if mode=="duplicates":question["citations"]*=2
+        if mode=="duplicate-invalid-quote":question["citations"].append({**question["citations"][0],"quote":"PRIVATE fabricated evidence"})
         if mode=="count":value["questions"]=[]
         if mode=="invalid-answer":question["options"][1]["isCorrect"]=True
         return value
@@ -83,6 +83,40 @@ def test_scope_before_and_after_llm(context):
     provider.callback=revoke
     response=client.post("/internal/rag/generate",headers=headers,json=body)
     assert response.status_code==404 and provider.calls==1
+
+
+def test_grounded_repeated_citation_returns_one_verified_source(context):
+    client,provider,_,_,body,headers,_=context
+    def change(value):
+        value['questions'][0]['citations']*=3
+        return value
+    provider.change=change
+    response=client.post('/internal/rag/generate',headers=headers,json=body)
+    assert response.status_code==200,response.text
+    citations=response.json()['questions'][0]['citations']
+    assert len(citations)==1 and citations[0]['quote']==SOURCE
+    assert provider.calls==1
+
+
+def test_citation_merge_preserves_distinct_chunks_and_rejects_excessive_span(caplog):
+    from app.schemas.grounded_generation import RawCitation
+    from app.schemas.rag import RetrievedChunk
+    from app.services.chunking import chunk_document
+    from app.services.question_generator import checked_citations,InvalidQuestionsError
+    text='FIRST '+('x'*610)+' LAST'
+    chunk=chunk_document(uuid4(),source(text))[0]
+    evidence=RetrievedChunk(**chunk.model_dump(),index_id=uuid4(),document_id=uuid4(),version_id=uuid4(),source_sha256='a'*64,similarity=1.)
+    other_chunk=chunk_document(uuid4(),source('OTHER source evidence'))[0]
+    other=RetrievedChunk(**other_chunk.model_dump(),index_id=evidence.index_id,document_id=evidence.document_id,version_id=evidence.version_id,source_sha256='a'*64,similarity=1.)
+    chunks={c.chunk_id:c for c in [evidence,other]}
+    raw=[RawCitation(chunk_id=evidence.chunk_id,quote='FIRST'),RawCitation(chunk_id=other.chunk_id,quote='OTHER')]
+    result=checked_citations(raw,chunks,slot=6,mode='planned')
+    assert [c.chunk.chunk_id for c in result]==list(chunks)
+    assert [c.quote for c in result]==['FIRST','OTHER']
+    raw.append(RawCitation(chunk_id=evidence.chunk_id,quote='LAST'))
+    with pytest.raises(InvalidQuestionsError):checked_citations(raw,chunks,slot=6,mode='planned')
+    assert 'reason=citation_span_too_long mode=planned slot=6' in caplog.text
+    assert 'FIRST' not in caplog.text and 'LAST' not in caplog.text
 
 
 def test_cancellation_releases_shared_generation_slot(context):
