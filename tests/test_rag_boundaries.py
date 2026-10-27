@@ -21,6 +21,30 @@ def intake_scope(token="fixture-token", configured="fixture-token"):
     }
 
 
+def test_outline_unexpected_error_logs_only_type_and_preserves_mapping(caplog):
+    from uuid import uuid4
+    from app.api.rag import outline
+    from app.schemas.knowledge_plan import OutlineRequest
+    from app.services.rag_errors import RagError
+
+    async def run():
+        repository = SimpleNamespace(outline_chunks=AsyncMock(side_effect=RuntimeError("PRIVATE source and credentials")))
+        service = SimpleNamespace(require_profile=Mock(), slots=asyncio.Semaphore(1), repository=repository)
+        command = OutlineRequest(owner_id=uuid4(), index_id=uuid4(), profile_id="a" * 64, title="Fixture")
+        with caplog.at_level("WARNING", logger="app.api.rag"):
+            with pytest.raises(RagError) as caught:
+                await outline(command, service)
+        assert caught.value.code == "RAG_STORAGE_UNAVAILABLE"
+        assert caught.value.status == 503 and caught.value.retryable
+        assert service.slots._value == 1
+    asyncio.run(run())
+    records = [record for record in caplog.records if record.name == "app.api.rag"]
+    assert len(records) == 1
+    assert records[0].getMessage() == "rag_outline_failed exception_type=RuntimeError"
+    assert records[0].exc_info is None
+    assert "PRIVATE" not in caplog.text
+
+
 @pytest.mark.parametrize("token,configured,status,code", [
     (None, "fixture-token", 401, "RAG_UNAUTHORIZED"),
     ("wrong", "fixture-token", 401, "RAG_UNAUTHORIZED"),

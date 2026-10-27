@@ -1,5 +1,8 @@
 # CLAUDE.md — testhub-ai-service
 
+`CONTINUITY.md` chỉ ở local và được gitignore. Nếu chưa có, tạo file local với
+tiêu đề và trạng thái đã xác minh trước khi đọc/cập nhật; không thêm vào Git.
+
 Hướng dẫn chính nằm trong `AGENTS.md`; file này chỉ là điểm vào cho Claude Code. Trạng thái đã xác minh và việc tiếp theo nằm trong `CONTINUITY.md`.
 
 @AGENTS.md

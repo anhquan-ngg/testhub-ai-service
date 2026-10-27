@@ -1,5 +1,9 @@
 # AGENTS.md — testhub-ai-service
 
+`CONTINUITY.md` là ghi chú bàn giao local, được gitignore. Nếu chưa tồn tại,
+tạo file local với tiêu đề và trạng thái đã xác minh trước khi đọc/cập nhật;
+không thêm file này vào Git. Quy tắc này áp dụng cho mọi yêu cầu đọc file bên dưới.
+
 ## Source-wide knowledge plans (2026-10-25)
 
 - POST /internal/rag/outline reconstructs all authorized chunks, recognizes numbered chapter/section headings and proposes inferred page topics when no outline exists. These are editable heuristics, not validated semantic classifications.

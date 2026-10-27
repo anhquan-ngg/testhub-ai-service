@@ -1,6 +1,7 @@
 """Authenticated internal RAG commands; NestJS owns authorization and queueing."""
 
 import asyncio
+import logging
 
 from fastapi import APIRouter, Depends, Request, Response
 
@@ -12,6 +13,8 @@ from app.services.retrieval import RagService
 from app.services.grounded_generation import GroundedGeneration
 from app.schemas.grounded_generation import GroundedGenerateRequest, GroundedGenerateResponse
 from app.schemas.knowledge_plan import OutlineRequest, OutlineResponse
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/internal/rag", tags=["rag"], dependencies=[Depends(require_internal_token)], responses={
     status: {"model": RagErrorResponse, "description": description}
@@ -68,7 +71,8 @@ async def outline(input: OutlineRequest, service: RagService = Depends(get_rag))
         raise
     except TimeoutError:
         raise RagError("RAG_DEADLINE", 504, True) from None
-    except Exception:
+    except Exception as exc:
+        logger.warning("rag_outline_failed exception_type=%s", type(exc).__name__)
         raise RagError("RAG_STORAGE_UNAVAILABLE", 503, True) from None
     finally:
         service.slots.release()

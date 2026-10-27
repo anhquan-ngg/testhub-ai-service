@@ -290,4 +290,5 @@ Dockerfile
 Parser PDF/PPTX, chunking, Google embedding, pgvector, retrieval và sinh câu RAG có
 trích dẫn đã được triển khai. OCR và provider khác vẫn là bước sau. NestJS
 giữ quyền truy cập, metadata, batch, bản nháp và duyệt/commit. Xem
-[CONTINUITY.md](CONTINUITY.md) và hướng dẫn backend cho trạng thái/lệnh chạy.
+`CONTINUITY.md` local (nếu chưa có, tạo ghi chú trạng thái đã xác minh; file được
+gitignore, không thêm vào Git) và hướng dẫn backend cho trạng thái/lệnh chạy.
