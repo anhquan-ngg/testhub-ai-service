@@ -30,14 +30,15 @@ def register_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(ServiceError)
     async def service_error_handler(request: Request, exc: ServiceError) -> JSONResponse:
+        provider_name = "9Router" if request.app.state.settings.llm_provider == "9router" else "Gemini"
         if isinstance(exc, ProviderTimeoutError):
-            code, message = 504, "Gemini request timed out"
+            code, message = 504, f"{provider_name} request timed out"
         elif isinstance(exc, ServiceUnavailableError):
             code, message = 503, "Generation service unavailable"
         elif isinstance(exc, InvalidQuestionsError):
-            code, message = 502, "Gemini returned invalid question JSON"
+            code, message = 502, f"{provider_name} returned invalid question JSON"
         else:
-            code, message = 502, "Gemini request failed"
+            code, message = 502, f"{provider_name} request failed"
         if request.url.path.startswith("/internal/rag/"):
             rag_code = "RAG_OUTPUT_INVALID" if isinstance(exc,InvalidQuestionsError) else "RAG_GENERATION_TIMEOUT" if isinstance(exc,ProviderTimeoutError) else "RAG_GENERATION_UNAVAILABLE" if isinstance(exc,ServiceUnavailableError) else "RAG_GENERATION_FAILED"
             return JSONResponse(status_code=code,content={"detail":{"code":rag_code,"retryable":False}})

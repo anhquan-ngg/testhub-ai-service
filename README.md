@@ -109,6 +109,24 @@ Nếu `.venv` đã được tạo bằng phiên bản Python khác, hãy tạo l
 
 `GET /health` trả `{"status":"ok"}` mà không gọi Gemini. Swagger UI ở `http://127.0.0.1:8000/docs`. Chỉ bind `127.0.0.1` khi phát triển local; trong Docker, chỉ kết nối service này qua mạng nội bộ.
 
+### Dùng 9Router làm LLM sinh câu hỏi
+
+Mặc định `LLM_PROVIDER=gemini`. Để sinh câu hỏi qua [9Router](https://github.com/decolua/9router) (OpenAI-compatible, `POST {ROUTER_BASE_URL}/chat/completions`, không streaming), đặt trong `.env`:
+
+```dotenv
+LLM_PROVIDER=9router
+ROUTER_BASE_URL=http://127.0.0.1:20128/v1
+ROUTER_API_KEY=<key tạo trong dashboard 9Router>
+ROUTER_MODEL=<model hoặc combo trong 9Router>
+```
+
+- `ROUTER_BASE_URL` phải là `http(s)://host[:port]/v1`, không chứa thông tin đăng nhập, query hay fragment. Trong Docker, `127.0.0.1` là chính container; dùng hostname/mạng nội bộ tới 9Router.
+- `ROUTER_TIMEOUT_MS` (mặc định 30000, 1–120000), `ROUTER_MAX_ATTEMPTS` (mặc định 1, 1–5; chỉ retry `408/429/500/502/503/504` và nằm trong `GENERATION_TIMEOUT_MS`), `ROUTER_MAX_OUTPUT_TOKENS` (mặc định 16384, 1–65536).
+- `ROUTER_RESPONSE_FORMAT=json_schema` (mặc định, strict) hoặc `json_object` (schema nhúng trong prompt) nếu model/upstream không hỗ trợ `json_schema`.
+- Kiểm tra số câu, đáp án, trích dẫn và contract NestJS/frontend không đổi. Quay lại Gemini bằng `LLM_PROVIDER=gemini`; không có fallback tự động.
+- **Embedding/RAG không đi qua 9Router**: `RAG_ENABLED=true` vẫn cần `GEMINI_API_KEY` và `RAG_DATABASE_URL`. Đổi LLM không cần reindex.
+- `/health` không chứng minh 9Router khả dụng; hãy chạy một lần smoke test bằng dữ liệu giả sau khi cấu hình.
+
 ## Contract `POST /internal/generate`
 
 Header bắt buộc: `X-Internal-Token: <INTERNAL_API_TOKEN>`.
@@ -151,7 +169,7 @@ Ví dụ kết quả:
 
 `question_text`, `options`, `question_type`, `question_format` và `correct_answer` dùng các tên trường của ngân hàng câu hỏi TestHub; khi tích hợp NestJS cần chuyển mảng `options` thành chuỗi JSON theo schema backend. Prototype gọi Gemini trong backend đã được gỡ; Python service là nơi thực hiện sinh câu hỏi. Service kiểm tra số câu, bốn lựa chọn khác nhau, số đáp án đúng theo loại câu ở từng vị trí (`SINGLE_CHOICE` đúng 1, `MULTIPLE_CHOICE` 2–3), độ dài và câu hỏi trùng. Việc kiểm chứng nội dung với tài liệu và duyệt cuối vẫn thuộc giảng viên/backend.
 
-Mã lỗi chính: `401` token thiếu/sai; `422` request sai; `503` thiếu cấu hình hoặc hết năng lực xử lý; `502` Gemini lỗi hoặc JSON không hợp lệ; `504` Gemini timeout. Nội dung lỗi upstream không chứa API key, prompt hay đoạn văn bản.
+Mã lỗi chính: `401` token thiếu/sai; `422` request sai; `503` thiếu cấu hình hoặc hết năng lực xử lý; `502` Gemini/9Router lỗi hoặc JSON không hợp lệ; `504` Gemini/9Router timeout. Nội dung lỗi upstream không chứa API key, prompt hay đoạn văn bản.
 
 ## Cấu hình và xử lý lỗi
 
@@ -272,7 +290,7 @@ app/
 ├── config.py
 ├── errors.py
 ├── api/{generation,documents,rag,dependencies,errors}.py
-├── providers/{base,gemini}.py
+├── providers/{base,gemini,nine_router,factory}.py
 ├── schemas/{question,document,rag,grounded_generation}.py
 ├── services/{prompt_builder,question_generator,document_parser,document_parser_worker}.py
 ├── services/{chunking,embedding,retrieval,rag_errors,grounded_generation}.py

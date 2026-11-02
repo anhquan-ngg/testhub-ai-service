@@ -162,7 +162,9 @@ testhub-ai-service/
 │   │   └── question_generator.py  # Điều phối provider, kiểm tra đầu ra
 │   ├── providers/
 │   │   ├── base.py                # Protocol chung cho LLM provider
-│   │   ├── gemini.py              # Provider đầu tiên cần hiện thực
+│   │   ├── gemini.py              # Provider mặc định (LLM_PROVIDER=gemini)
+│   │   ├── nine_router.py         # Adapter OpenAI-compatible cho 9Router (LLM_PROVIDER=9router)
+│   │   ├── factory.py             # Chọn provider theo LLM_PROVIDER, không fallback ngầm
 │   │   ├── openai.py              # Dự kiến sau MVP
 │   │   └── grok.py                # Dự kiến sau MVP
 │   ├── schemas/
@@ -192,7 +194,7 @@ Contract văn bản `text-generation.v1` đã thống nhất qua `contracts/text
 - Router chỉ nhận/kiểm tra request và gọi service. Parser, retrieval, prompt và provider ở đúng module riêng.
 - Lifespan sở hữu settings và Gemini client dùng chung cho mỗi process; không đọc env hoặc tạo connection pool cho từng request. Service quản lý semaphore và deadline tổng; API dependencies xử lý token, exception handler tập trung ánh xạ lỗi HTTP.
 - Retry SDK có giới hạn qua `GEMINI_MAX_ATTEMPTS`, nằm trong deadline `GENERATION_TIMEOUT_MS`; timeout phải trả 504 và giải phóng suất xử lý. Log upstream chỉ ghi loại exception/mã HTTP/giai đoạn, không log message hoặc traceback chứa dữ liệu nguồn. Cleanup client không được che lỗi request.
-- `providers/base.py` là contract chung cho các LLM; Gemini là provider đầu tiên. Tách embedding khỏi LLM provider.
+- `providers/base.py` là contract chung cho các LLM; `LLM_PROVIDER` chọn `gemini` (mặc định) hoặc `9router` (`providers/nine_router.py`, httpx không streaming, `ROUTER_*`), không fallback ngầm. Validation đầu ra vẫn nằm ở `QuestionGenerator`. Tách embedding khỏi LLM provider: RAG vẫn dùng `GEMINI_API_KEY`.
 - Kiểm tra cấu trúc và ngữ nghĩa tối thiểu của đầu ra: số câu, loại/mức nhận thức hợp lệ, số phương án, đúng một đáp án cho câu `SINGLE_CHOICE` và 2–3 đáp án cho `MULTIPLE_CHOICE` theo từng vị trí cấu hình, câu rỗng/trùng. JSON hợp lệ chưa chứng minh câu hỏi đúng kiến thức; giảng viên vẫn phải duyệt.
 - Sinh câu hỗ trợ **một đáp án và nhiều đáp án** theo `question_configs`, văn bản qua API cũ và PDF/PPTX qua RAG có trích dẫn.
   DOCX, provider khác và OCR là bước sau. Giữ `text-generation.v1` tương thích.

@@ -348,6 +348,50 @@ def test_threaded_spawn_cancellation_retains_and_reaps_child(monkeypatch, caplog
     asyncio.run(run())
 
 
+def test_aclose_waits_for_late_spawn_cleanup(monkeypatch):
+    original = subprocess.Popen
+    entered, release = threading.Event(), threading.Event()
+    children, folders = [], []
+
+    async def unsupported(*args, **kwargs):
+        raise NotImplementedError
+
+    def delayed_spawn(args, **kwargs):
+        folders.append(Path(args[4]).parent)
+        entered.set()
+        assert release.wait(5)
+        child = original([sys.executable, "-c", "import time; time.sleep(10)"], **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", unsupported)
+    monkeypatch.setattr(subprocess, "Popen", delayed_spawn)
+
+    async def stream():
+        yield pdf_bytes()
+
+    async def run():
+        parser = DocumentParser(timeout_seconds=5, max_concurrency=1)
+        active = asyncio.create_task(parser.extract(stream(), "PDF", False))
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            active.cancel()
+            await asyncio.gather(active, return_exceptions=True)
+            assert parser._cleanup_tasks and not children
+            closing = asyncio.create_task(parser.aclose())
+            await asyncio.sleep(0.05)
+            assert not closing.done()
+            release.set()
+            await asyncio.wait_for(closing, 3)
+            assert len(children) == 1 and children[0].poll() is not None
+            assert not parser._cleanup_tasks and not folders[0].exists()
+            assert parser._slots._value == 1
+        finally:
+            release.set()
+            await parser.aclose()
+
+    asyncio.run(run())
+
 def test_parser_child_receives_only_minimal_environment(monkeypatch):
     original = asyncio.create_subprocess_exec
     environments = []

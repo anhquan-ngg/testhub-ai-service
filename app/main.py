@@ -11,7 +11,7 @@ from app.api.errors import register_error_handlers
 from app.api.generation import router as generation_router
 from app.config import Settings
 from app.providers.base import ProviderError, QuestionProvider
-from app.providers.gemini import GeminiProvider
+from app.providers.factory import create_provider
 from app.services.question_generator import QuestionGenerator
 from app.api.documents import router as documents_router
 from app.services.document_parser import DocumentParser
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 def create_app(
     settings: Settings | None = None,
-    provider_factory: Callable[[Settings], QuestionProvider] = GeminiProvider,
+    provider_factory: Callable[[Settings], QuestionProvider] = create_provider,
 ) -> FastAPI:
     """Build the API with settings and a shared provider owned by its lifespan."""
     @asynccontextmanager
@@ -30,7 +30,7 @@ def create_app(
         config = settings if settings is not None else Settings.from_env()
         app.state.settings = config
         app.state.generator = None
-        app.state.document_parser = DocumentParser()
+        document_parser = app.state.document_parser = DocumentParser()
         app.state.rag = None
         app.state.grounded_generator = None
         rag_repository = embedding = None
@@ -51,7 +51,7 @@ def create_app(
             except Exception:
                 logger.warning("rag_initialization_unavailable")
         provider = None
-        if config.gemini_api_key:
+        if config.llm_provider == "9router" or config.gemini_api_key:
             try:
                 provider = provider_factory(config)
             except ProviderError:
@@ -68,6 +68,7 @@ def create_app(
         try:
             yield
         finally:
+            await document_parser.aclose()
             if embedding is not None:
                 await embedding.aclose()
             if rag_repository is not None:
@@ -100,7 +101,7 @@ def create_app(
 
     @app.get("/health", tags=["health"])
     async def health() -> dict[str, str]:
-        """Confirm the process is serving requests without calling Gemini."""
+        """Confirm the process is serving requests without calling an upstream."""
         return {"status": "ok"}
 
     return app

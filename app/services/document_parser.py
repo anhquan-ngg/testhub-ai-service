@@ -1,6 +1,7 @@
 """Bounded document intake and killable child-process orchestration."""
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -48,7 +49,7 @@ class DocumentParser:
         self._cleanup_tasks: set[asyncio.Task[None]] = set()
 
     async def _cleanup_spawn(
-        self, spawn: asyncio.Task[subprocess.Popen[bytes]], folder: tempfile.TemporaryDirectory[str],
+        self, spawn: asyncio.Future[subprocess.Popen[bytes]], folder: tempfile.TemporaryDirectory[str],
     ) -> None:
         """Own a late spawn until its child can be killed/reaped and files removed."""
         try:
@@ -57,7 +58,9 @@ class DocumentParser:
                     process = ThreadedProcess(await asyncio.shield(spawn))
                     break
                 except asyncio.CancelledError:
-                    # Cleanup ownership must survive cancellation of its supervisor.
+                    # Cleanup ownership must survive cancellation of its supervisor, including
+                    # loop shutdown. `spawn` is a bare executor future (not a task), so only a
+                    # direct cancel can drop the thread's result; nothing here issues one.
                     if spawn.cancelled():
                         raise
                     continue
@@ -66,6 +69,11 @@ class DocumentParser:
             await process.wait()
         finally:
             folder.cleanup()
+
+    async def aclose(self) -> None:
+        """Wait for pending late-spawn cleanup so no child or temp folder outlives shutdown."""
+        while self._cleanup_tasks:
+            await asyncio.gather(*self._cleanup_tasks, return_exceptions=True)
 
     def _cleanup_finished(self, task: asyncio.Task[None]) -> None:
         self._cleanup_tasks.discard(task)
@@ -132,7 +140,11 @@ class DocumentParser:
             except NotImplementedError:
                 # e.g. uvicorn --reload on Windows runs a SelectorEventLoop.
                 logger.info("document_subprocess_thread_fallback")
-                spawn = asyncio.create_task(asyncio.to_thread(subprocess.Popen, args, **options))
+                # A bare executor future, unlike a task, is not cancelled by loop shutdown,
+                # so the spawned Popen result is never abandoned before it is reaped.
+                spawn = asyncio.get_running_loop().run_in_executor(
+                    None, functools.partial(subprocess.Popen, args, **options),
+                )
                 try:
                     process = ThreadedProcess(await asyncio.shield(spawn))
                 except asyncio.CancelledError:
