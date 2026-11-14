@@ -3,7 +3,7 @@ import asyncio
 import json
 from app.providers.base import ProviderTimeoutError
 from app.schemas.grounded_generation import GroundedGenerateRequest, GroundedGenerateResponse
-from app.services.prompt_builder import ANSWER_INSTRUCTIONS, CITATION_INSTRUCTIONS, blueprint_json
+from app.services.prompt_builder import ANSWER_INSTRUCTIONS, CITATION_INSTRUCTIONS, EVIDENCE_OUTCOME_INSTRUCTIONS, blueprint_json
 from app.services.question_generator import QuestionGenerator
 from app.services.retrieval import RagService
 from app.services.rag_errors import RagError
@@ -20,22 +20,20 @@ def grounded_prompt(request: GroundedGenerateRequest, context: list[dict]) -> st
         f"Count: {len(slots)}. Return the questions in exactly this order; every item fixes "
         f"the question_type and cognitive level (question_format): {blueprint_json(slots)}. "
         "Each question has four distinct options. "
-        + ANSWER_INSTRUCTIONS + CITATION_INSTRUCTIONS +
-        "If evidence cannot support the requested questions, "
-        "return an empty questions list. JSON shape: {questions:[{question_text,options:"
-        "[{text,isCorrect}],citations:[{chunk_id,quote}]}]}. "
+        + ANSWER_INSTRUCTIONS + CITATION_INSTRUCTIONS + EVIDENCE_OUTCOME_INSTRUCTIONS +
         "Reference JSON follows:\n" + json.dumps({"query":request.query,"excerpts":context},ensure_ascii=False)
     )
 
 
 class GroundedGeneration:
-    def __init__(self, rag: RagService, generator: QuestionGenerator) -> None:
+    def __init__(self, rag: RagService, generator: QuestionGenerator, *, timeout_ms: int = 75_000) -> None:
         self.rag, self.generator = rag, generator
+        self._timeout_seconds = timeout_ms / 1000
 
     async def generate(self, request: GroundedGenerateRequest) -> GroundedGenerateResponse:
-        """Bound retrieval + LLM + scope recheck to 75s; never auto-reissue a failed call."""
+        """Bound retrieval + LLM + scope recheck to the configured deadline; never auto-reissue a failed call."""
         try:
-            return await asyncio.wait_for(self._generate(request),75)
+            return await asyncio.wait_for(self._generate(request),self._timeout_seconds)
         except TimeoutError:
             raise ProviderTimeoutError("RAG generation deadline exceeded") from None
 

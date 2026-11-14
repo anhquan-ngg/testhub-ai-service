@@ -22,7 +22,7 @@ def byte_end(text: str, start: int, budget: int) -> int:
 
 def chunk_document(index_id: UUID, extraction: ExtractionResult) -> list[Chunk]:
     """Create stable chunks, never join different pages/slides/notes or alter text."""
-    if extraction.status != "EXTRACTED":
+    if extraction.status not in ("EXTRACTED", "PARTIAL"):
         raise RagError("RAG_OCR_REQUIRED")
     chunks: list[Chunk] = []
     for span in extraction.spans:

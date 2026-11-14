@@ -31,6 +31,16 @@ CITATION_INSTRUCTIONS = (
 )
 
 
+EVIDENCE_OUTCOME_INSTRUCTIONS = (
+    "Assess evidence for every requested slot before answering. If any slot lacks evidence "
+    "for its objective/type/level, return no questions and list the unsupported 1-based slot "
+    "indexes in unsupported_slots:[{slot,reason:\"INSUFFICIENT_EVIDENCE\"}]. "
+    "Do not return partial questions, substitute topics, or add unsupported outside facts. "
+    "On success return all questions and unsupported_slots:[]. "
+    "Return JSON {questions:[{question_text,options:[{text,isCorrect}],"
+    "citations:[{chunk_id,quote}]}],unsupported_slots:[{slot,reason}]}. "
+)
+
 def blueprint_json(slots: list[QuestionSlot]) -> str:
     """List the ordered type/level of every requested question for the model."""
     return json.dumps(

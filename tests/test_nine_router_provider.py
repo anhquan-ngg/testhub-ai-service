@@ -249,7 +249,11 @@ async def test_grounded_generation_uses_grounded_schema() -> None:
     provider = NineRouterProvider(SETTINGS, transport=httpx.MockTransport(handler))
     assert await provider.generate_grounded("prompt") == "{}"
     await provider.aclose()
-    assert seen[0]["response_format"]["json_schema"]["name"] == "RawGroundedQuestionList"
+    schema = seen[0]["response_format"]["json_schema"]
+    assert schema["name"] == "RawGroundedGenerationOutcome"
+    assert "unsupported_slots" in schema["schema"]["required"]
+    assert schema["schema"]["properties"]["questions"].get("minItems", 0) == 0
+    assert schema["schema"]["$defs"]["UnsupportedSlot"]["additionalProperties"] is False
 
 @pytest.mark.anyio
 async def test_aclose_is_idempotent() -> None:

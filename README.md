@@ -214,6 +214,40 @@ Test dùng provider giả lập và SDK thật với `httpx.MockTransport`, khô
 
 ## Khắc phục lỗi RAG
 
+### Grounded generation returns 422: insufficient evidence
+
+A valid model refusal is not malformed JSON. Grounded prompts use an internal
+outcome `{questions:[], unsupported_slots:[{slot:2, reason:"INSUFFICIENT_EVIDENCE"}]}`
+when any requested slot lacks support. Slots are 1-based in frozen-plan order,
+expanded by each item's count. The common parser checks unique, in-request slot
+numbers; legacy `{"questions":[]}` is accepted as an unspecified refusal.
+
+These outcomes return `RAG_INSUFFICIENT_EVIDENCE` (HTTP 422, not retryable), with
+optional `detail.diagnostics.issues` containing only slot and reason. An empty
+issues list means the deficient slots are unknown. Planned retrieval with no
+selected chunks returns the same code before calling the model, identifying the
+first deficient item's slots with `NO_RETRIEVED_CONTEXT`.
+
+NestJS maps this and older context-shortage codes to `AI_INSUFFICIENT_EVIDENCE`,
+persists sanitized failure details and exposes them on the owned batch detail.
+The vi/en UI explains known slots from the frozen plan, or explicitly says the
+slots are unknown. No drafts, automatic semantic retries, fallback or automatic
+batch splitting occur. Review objectives, cognitive levels, question formats and
+source pages before creating a new batch; fewer questions alone do not prove
+there is enough evidence. Existing FAILED batches are not rewritten.
+
+Malformed JSON/schema, contradictory partial questions/refusals, invalid slot
+numbers, wrong nonempty counts, answers or citations remain `RAG_OUTPUT_INVALID`
+(502). Public successful `rag-generation.v1` responses still require 1..20
+questions; text generation and Google embeddings are unchanged. Quote checks
+prove source matching, not semantic correctness (`UNASSESSED`).
+
+Retrieval logs include only slot ranges, candidate/chunk counts, context bytes
+and source-unit counts. Schema logs include error counts and at most five
+sanitized field locations/types, never inputs, messages, arbitrary JSON keys,
+source content or model output. No additional paid generation call is made to
+repair a refusal.
+
 ### Planned generation returns 502
 
 The access log alone does not identify the failure. Inspect the preceding

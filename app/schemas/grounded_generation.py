@@ -31,6 +31,23 @@ class RawGroundedQuestion(RawQuestion):
 class RawGroundedQuestionList(RawQuestionList):
     questions: list[RawGroundedQuestion] = Field(min_length=1, max_length=20)
 
+class UnsupportedSlot(StrictModel):
+    slot: int = Field(ge=1, le=20)
+    reason: Literal["INSUFFICIENT_EVIDENCE"]
+
+class RawGroundedGenerationOutcome(RawGroundedQuestionList):
+    """Internal model outcome; empty questions are a refusal, never a successful batch."""
+    questions: list[RawGroundedQuestion] = Field(max_length=20)
+    unsupported_slots: list[UnsupportedSlot] = Field(default_factory=list, max_length=20)
+
+    @model_validator(mode="after")
+    def atomic_outcome(self) -> Self:
+        if self.questions and self.unsupported_slots:
+            raise ValueError("Partial generation is not supported")
+        if len({issue.slot for issue in self.unsupported_slots}) != len(self.unsupported_slots):
+            raise ValueError("Duplicate unsupported slot")
+        return self
+
 class SourceCitation(StrictModel):
     chunk: RetrievedChunk
     quote: str = Field(min_length=1, max_length=600)
@@ -60,5 +77,13 @@ class GeminiGroundedQuestion(GeminiQuestion):
     citations: list[GeminiCitation] = Field(min_length=1, max_length=3,
         description="One citation per distinct chunk_id. Combine supporting facts from the same chunk into one exact contiguous quote of at most 600 characters.")
 
+class GeminiUnsupportedSlot(BaseModel):
+    slot: int = Field(ge=1, le=20)
+    reason: Literal["INSUFFICIENT_EVIDENCE"]
+
 class GeminiGroundedQuestionList(BaseModel):
     questions: list[GeminiGroundedQuestion]
+    unsupported_slots: list[GeminiUnsupportedSlot] = Field(
+        max_length=20,
+        description="Empty on success. On insufficient evidence, return no questions and identify unsupported 1-based slot indexes.",
+    )

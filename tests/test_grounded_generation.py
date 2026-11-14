@@ -65,13 +65,33 @@ def test_reject_unsupported_evidence_without_retry(context,mode):
         if mode=="quote":question["citations"][0]["quote"]="PRIVATE fabricated evidence"
         if mode=="chunk":question["citations"][0]["chunk_id"]=str(uuid4())
         if mode=="duplicate-invalid-quote":question["citations"].append({**question["citations"][0],"quote":"PRIVATE fabricated evidence"})
-        if mode=="count":value["questions"]=[]
+        if mode=="count":value["questions"].append({**question,"question_text":"Another distinct question?"})
         if mode=="invalid-answer":question["options"][1]["isCorrect"]=True
         return value
     provider.change=change
     response=client.post("/internal/rag/generate",headers=headers,json=body)
     assert response.status_code==502 and "PRIVATE" not in response.text
     assert response.json()["detail"]["code"]=="RAG_OUTPUT_INVALID"
+    assert provider.calls==1
+
+
+@pytest.mark.parametrize('issues', [None, [{'slot':1,'reason':'INSUFFICIENT_EVIDENCE'}]])
+def test_grounded_empty_output_is_evidence_failure_not_invalid_json(context, issues):
+    client,provider,_,_,body,headers,_=context
+    provider.change=lambda value: {'questions':[], **({'unsupported_slots':issues} if issues is not None else {})}
+    response=client.post('/internal/rag/generate',headers=headers,json=body)
+    assert response.status_code==422
+    assert response.json()['detail']=={'code':'RAG_INSUFFICIENT_EVIDENCE','retryable':False,
+                                      'diagnostics':{'issues':issues or []}}
+    assert provider.calls==1
+
+
+def test_partial_output_cannot_be_accepted_as_evidence_refusal(context):
+    client,provider,_,_,body,headers,_=context
+    provider.change=lambda value: {**value,'unsupported_slots':[{'slot':1,'reason':'INSUFFICIENT_EVIDENCE'}]}
+    response=client.post('/internal/rag/generate',headers=headers,json=body)
+    assert response.status_code==502
+    assert response.json()['detail']['code']=='RAG_OUTPUT_INVALID'
     assert provider.calls==1
 
 
@@ -231,3 +251,14 @@ def test_locate_quote(quote,text,expected):
     assert result==expected
     if result is not None:
         assert result in text
+
+def test_outer_deadline_is_configurable(context):
+    client,provider,_,_,body,_,generator=context
+    rag=client.app.state.rag
+    async def run():
+        slow=GroundedGeneration(rag,generator,timeout_ms=20)
+        async def never(request):await asyncio.sleep(99)
+        slow._generate=never
+        with pytest.raises(ProviderTimeoutError):await slow.generate(GroundedGenerateRequest(**body))
+        assert slow._timeout_seconds==0.02 and GroundedGeneration(rag,generator)._timeout_seconds==75
+    asyncio.run(run())

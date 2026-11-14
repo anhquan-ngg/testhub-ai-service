@@ -93,6 +93,43 @@ def test_sdk_retries_503_and_reuses_client(monkeypatch) -> None:
     assert calls[0]["generationConfig"]["responseMimeType"] == "application/json"
 
 
+@pytest.mark.parametrize("unsupported_slots", [[], [{"slot": 1, "reason": "INSUFFICIENT_EVIDENCE"}]])
+def test_grounded_sdk_evidence_refusal_does_not_fallback(monkeypatch, unsupported_slots) -> None:
+    from app.providers.fallback import FallbackProvider
+    from app.services.question_generator import parse_grounded_outcome
+    from app.services.rag_errors import RagError
+
+    calls = []
+    outcome = json.dumps({"questions": [], "unsupported_slots": unsupported_slots})
+
+    def handler(request):
+        calls.append(json.loads(request.content))
+        return httpx.Response(200, json={"candidates": [{
+            "content": {"parts": [{"text": outcome}], "role": "model"},
+            "finishReason": "STOP",
+        }]})
+
+    install_transport(monkeypatch, handler)
+
+    async def run():
+        fallback = AsyncMock()
+        provider = FallbackProvider(GeminiProvider(SETTINGS), fallback)
+        try:
+            raw = await provider.generate_grounded("One slot supported only by supplied evidence.")
+            with pytest.raises(RagError) as refusal:
+                parse_grounded_outcome(raw, slot_count=1, mode="planned")
+            assert refusal.value.code == "RAG_INSUFFICIENT_EVIDENCE"
+            assert refusal.value.retryable is False
+            assert refusal.value.diagnostics is not None
+            assert refusal.value.diagnostics.model_dump() == {"issues": unsupported_slots}
+            fallback.generate_grounded.assert_not_awaited()
+        finally:
+            await provider.aclose()
+
+    asyncio.run(run())
+    assert len(calls) == 1
+
+
 def test_retries_are_bounded(monkeypatch) -> None:
     calls = 0
 

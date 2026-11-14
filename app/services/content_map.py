@@ -18,6 +18,32 @@ def topic_name(name: str) -> str:
     return base if base and any(char.isalpha() for char in base) else normalized
 
 
+def disambiguate_siblings(records: dict[str, dict]) -> bool:
+    """Make sibling names unique by qualifying them with their own heading line.
+
+    Distinct headings may share a title (e.g. "Part 2: Normalization" and
+    "3. Normalization"); they are different source topics, so they are kept
+    apart instead of being merged.
+    """
+    groups: dict[tuple[str | None, str], list[str]] = defaultdict(list)
+    for node_id, record in records.items():
+        groups[(record["parent_id"], record["name"].casefold())].append(node_id)
+    changed = False
+    for members in (ids for ids in groups.values() if len(ids) > 1):
+        taken = {records[i]["name"].casefold() for i in records if records[i]["parent_id"] == records[members[0]]["parent_id"]}
+        for ordinal, node_id in enumerate(members, 1):
+            record = records[node_id]
+            label = topic_name(record["evidence"])[:200]
+            candidate = label if label.casefold() != record["name"].casefold() and label.casefold() not in taken else ""
+            suffix = ordinal
+            while not candidate or candidate.casefold() in taken:
+                candidate = f"{label[:190]} ({suffix})"
+                suffix += 1
+            taken.add(candidate.casefold())
+            record["name"] = candidate
+            changed = True
+    return changed
+
 def content_map(index_id: UUID, title: str, chunks: list[dict]) -> OutlineResponse:
     """Reconstruct overlapping chunks by Unicode offsets, never by a top-k query sample."""
     if not chunks or len(chunks) > 5000:
@@ -123,9 +149,11 @@ def content_map(index_id: UUID, title: str, chunks: list[dict]) -> OutlineRespon
             records[node]["source_units"].add(unit)
         if records.get(active[0] if active else "", {}).get("origin") == "INFERRED":
             active = []
+    disambiguated = disambiguate_siblings(records)
     nodes = [OutlineNode(**{**record, "source_units": [SourceUnit(kind=kind, position=position)
              for kind, position in sorted(record["source_units"], key=lambda unit: (unit[1], unit[0]))]}) for record in records.values()]
     return OutlineResponse(index_id=index_id, document_id=identity["document_id"], version_id=identity["version_id"],
                            source_sha256=identity["source_sha256"], nodes=nodes,
                            source_units=[SourceUnit(kind=kind, position=position) for kind, position in units],
-                           warnings=["REVIEW_CONTENT_MAP", "OBJECTIVES_ARE_SUGGESTIONS"] + ([] if headings else ["INFERRED_TOPICS"]))
+                           warnings=["REVIEW_CONTENT_MAP", "OBJECTIVES_ARE_SUGGESTIONS"] + ([] if headings else ["INFERRED_TOPICS"])
+                           + (["DUPLICATE_TOPIC_NAMES_DISAMBIGUATED"] if disambiguated else []))

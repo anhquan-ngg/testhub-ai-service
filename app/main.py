@@ -64,7 +64,9 @@ def create_app(
                 )
         if app.state.rag is not None and app.state.generator is not None:
             from app.services.grounded_generation import GroundedGeneration
-            app.state.grounded_generator = GroundedGeneration(app.state.rag,app.state.generator)
+            app.state.grounded_generator = GroundedGeneration(
+                app.state.rag, app.state.generator, timeout_ms=config.effective_grounded_timeout_ms,
+            )
         try:
             yield
         finally:

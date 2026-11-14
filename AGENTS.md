@@ -4,6 +4,24 @@
 tạo file local với tiêu đề và trạng thái đã xác minh trước khi đọc/cập nhật;
 không thêm file này vào Git. Quy tắc này áp dụng cho mọi yêu cầu đọc file bên dưới.
 
+## Grounded evidence refusals
+
+- Use RawGroundedGenerationOutcome only for internal provider output. Empty
+  questions are an evidence refusal, not a successful public response; successful
+  rag-generation.v1 still requires 1..20 questions. Text and embeddings do not change.
+- unsupported_slots contains unique 1-based slots within the request and reason
+  INSUFFICIENT_EVIDENCE. Never accept questions together with refusals. Invalid
+  metadata/schema, counts, answers and citations still fail RAG_OUTPUT_INVALID.
+- Valid refusals become nonretryable RAG_INSUFFICIENT_EVIDENCE (422); diagnostics
+  contain only issues [{slot, reason}]. Legacy empty lists have unknown slots
+  (issues:[]); do not invent them. Missing planned chunks use NO_RETRIEVED_CONTEXT
+  for the first deficient item's expanded slots before any provider call.
+- No semantic retry, partial success, automatic splitting or evidence-triggered
+  fallback. Preserve slot-scoped citations and UNASSESSED quality status.
+- Log only bounded sanitized schema field/type metadata and retrieval slot/count/
+  byte summaries. Never log validation input/message, arbitrary JSON keys, prompt,
+  source or model output. Keep the exported RAG OpenAPI synchronized.
+
 ## Source-wide knowledge plans (2026-10-25)
 
 - POST /internal/rag/outline reconstructs all authorized chunks, recognizes numbered chapter/section headings and proposes inferred page topics when no outline exists. These are editable heuristics, not validated semantic classifications.
@@ -186,7 +204,7 @@ testhub-ai-service/
 3. **Ingestion RAG:** NestJS kiểm tra quyền và lưu file trên S3/MinIO; AI service trích xuất PDF/DOCX/PPTX, giữ trang/slide, chia chunks, tạo embeddings, lưu vào `rag`. Chỉ đánh dấu tài liệu `READY` sau khi xử lý xong.
 4. **Generation RAG:** Truy xuất chunks trong danh sách tài liệu được phép, phân bổ nguồn để bao phủ nhiều mục kiến thức, sinh câu hỏi kèm tham chiếu nguồn; NestJS kiểm duyệt và chỉ lưu câu được duyệt.
 
-Contract văn bản `text-generation.v1` đã thống nhất qua `contracts/text-generation.v1.json` và fixture tương ứng ở NestJS. Backend dùng `X-Internal-Token`, deadline mặc định 35000 ms và một HTTP invocation; Python giữ deadline 30000 ms/retry SDK. `AI_SERVICE_INTERNAL_TOKEN` của NestJS phải trùng `INTERNAL_API_TOKEN`, dùng 32–256 ký tự ASCII nhìn thấy được để tương thích HTTP header. Batch/persistence, chuyển file và schema RAG chưa triển khai. Đối chiếu `../testhub-v2-backend/docs/ai-question-generation.md` khi đổi contract; cập nhật cả hai fixture và type frontend.
+Contract văn bản `text-generation.v1` đã thống nhất qua `contracts/text-generation.v1.json` và fixture tương ứng ở NestJS. Backend dùng `X-Internal-Token`, deadline mặc định 35000 ms và một HTTP invocation; Python giữ deadline 30000 ms/retry SDK (mặc định; cấu hình được qua `GENERATION_TIMEOUT_MS`, `ROUTER_TIMEOUT_MS`, `GROUNDED_GENERATION_TIMEOUT_MS`, và chuỗi deadline phải lồng nhau với `AI_SERVICE_TIMEOUT_MS`). `LLM_FALLBACK_PROVIDER=gemini` (opt-in) chỉ fallback khi primary không khả dụng (kết nối/429/5xx), không fallback khi timeout hoặc output không hợp lệ. `AI_SERVICE_INTERNAL_TOKEN` của NestJS phải trùng `INTERNAL_API_TOKEN`, dùng 32–256 ký tự ASCII nhìn thấy được để tương thích HTTP header. Batch/persistence, chuyển file và schema RAG chưa triển khai. Đối chiếu `../testhub-v2-backend/docs/ai-question-generation.md` khi đổi contract; cập nhật cả hai fixture và type frontend.
 
 ## 5. Quy ước khi triển khai
 

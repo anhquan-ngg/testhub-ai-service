@@ -22,7 +22,10 @@ def register_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(RagError)
     async def rag_error_handler(request: Request, exc: RagError) -> JSONResponse:
-        return JSONResponse(status_code=exc.status, content={"detail": {"code": exc.code, "retryable": exc.retryable}})
+        detail: dict[str, object] = {"code": exc.code, "retryable": exc.retryable}
+        if exc.code == "RAG_INSUFFICIENT_EVIDENCE" and exc.diagnostics is not None:
+            detail["diagnostics"] = exc.diagnostics.model_dump(mode="json")
+        return JSONResponse(status_code=exc.status, content={"detail": detail})
 
     @app.exception_handler(ExtractionError)
     async def extraction_error_handler(request: Request, exc: ExtractionError) -> JSONResponse:

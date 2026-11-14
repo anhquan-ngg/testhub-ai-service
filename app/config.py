@@ -24,10 +24,19 @@ class Settings:
     router_max_attempts: int = 1
     router_max_output_tokens: int = 16_384
     router_response_format: str = "json_schema"
+    llm_fallback_provider: str = ""
+    grounded_timeout_ms: int = 0  # 0 = derive from generation_timeout_ms
 
     def __post_init__(self) -> None:
         if self.llm_provider not in ("gemini", "9router"):
             raise ValueError("LLM_PROVIDER must be gemini or 9router")
+        if self.llm_fallback_provider not in ("", "gemini"):
+            raise ValueError("LLM_FALLBACK_PROVIDER must be empty or gemini")
+        if self.llm_fallback_provider == "gemini":
+            if self.llm_provider == "gemini":
+                raise ValueError("LLM_FALLBACK_PROVIDER must differ from LLM_PROVIDER")
+            if not self.gemini_api_key:
+                raise ValueError("LLM_FALLBACK_PROVIDER=gemini requires GEMINI_API_KEY")
         if self.router_response_format not in ("json_schema", "json_object"):
             raise ValueError("ROUTER_RESPONSE_FORMAT must be json_schema or json_object")
         if self.llm_provider == "9router":
@@ -58,10 +67,16 @@ class Settings:
             "router_timeout_ms": (1, 120_000),
             "router_max_attempts": (1, 5),
             "router_max_output_tokens": (1, 65_536),
+            "grounded_timeout_ms": (0, 300_000),
         }
         for name, (minimum, maximum) in bounds.items():
             if not minimum <= getattr(self, name) <= maximum:
                 raise ValueError(f"{name.upper()} must be between {minimum} and {maximum}")
+
+    @property
+    def effective_grounded_timeout_ms(self) -> int:
+        """Outer RAG deadline: never below the LLM deadline plus retrieval/scope-check headroom."""
+        return self.grounded_timeout_ms or max(75_000, self.generation_timeout_ms + 15_000)
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -93,4 +108,6 @@ class Settings:
             router_max_attempts=integer("ROUTER_MAX_ATTEMPTS", 1),
             router_max_output_tokens=integer("ROUTER_MAX_OUTPUT_TOKENS", 16_384),
             router_response_format=os.getenv("ROUTER_RESPONSE_FORMAT", "json_schema").strip(),
+            llm_fallback_provider=os.getenv("LLM_FALLBACK_PROVIDER", "").strip(),
+            grounded_timeout_ms=integer("GROUNDED_GENERATION_TIMEOUT_MS", 0),
         )

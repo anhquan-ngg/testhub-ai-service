@@ -9,8 +9,8 @@ import httpx
 from pydantic import BaseModel
 
 from app.config import Settings
-from app.providers.base import ProviderError, ProviderTimeoutError
-from app.schemas.grounded_generation import RawGroundedQuestionList
+from app.providers.base import ProviderError, ProviderTimeoutError, ProviderUnavailableError
+from app.schemas.grounded_generation import RawGroundedGenerationOutcome
 from app.schemas.question import RawQuestionList
 
 logger = logging.getLogger(__name__)
@@ -65,7 +65,7 @@ class NineRouterProvider:
 
     async def generate_grounded(self, prompt: str) -> str:
         """Generate grounded/planned drafts without changing citation validation."""
-        return await self._generate(prompt, RawGroundedQuestionList)
+        return await self._generate(prompt, RawGroundedGenerationOutcome)
 
     async def _generate(self, prompt: str, schema_model: type[BaseModel]) -> str:
         schema = schema_model.model_json_schema()
@@ -91,11 +91,11 @@ class NineRouterProvider:
                 return await self._request(payload)
             except _RetryableStatus as exc:
                 error = (ProviderTimeoutError("9Router request timed out") if exc.status in (408, 504)
-                         else ProviderError("9Router request failed"))
+                         else ProviderUnavailableError("9Router request failed"))
             except (TimeoutError, httpx.TransportError) as exc:
                 logger.warning("nine_router_failure stage=generate exception_type=%s", type(exc).__name__)
                 error = (ProviderTimeoutError("9Router request timed out") if isinstance(exc, (TimeoutError, httpx.TimeoutException))
-                         else ProviderError("9Router request failed"))
+                                         else ProviderUnavailableError("9Router request failed"))
             except ProviderError:
                 raise
             except Exception as exc:

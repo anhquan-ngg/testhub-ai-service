@@ -19,6 +19,15 @@ class SourceSpan(BaseModel):
     text: str = Field(max_length=MAX_TEXT_CHARS)
 
 
+class ExtractionQuality(BaseModel):
+    """Per-unit text classification; positions are original page/slide numbers."""
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    total_units: int = Field(ge=1, le=MAX_UNITS)
+    text_units: int = Field(ge=0, le=MAX_UNITS)
+    ocr_suspected_units: list[int] = Field(max_length=MAX_UNITS)
+    blank_units: list[int] = Field(max_length=MAX_UNITS)
+
 class ExtractionResult(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -27,10 +36,11 @@ class ExtractionResult(BaseModel):
     source_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     parser_version: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9./;:_-]+$")
     include_notes: bool
-    status: Literal["EXTRACTED", "OCR_REQUIRED"]
+    status: Literal["EXTRACTED", "PARTIAL", "OCR_REQUIRED"]
     unit_count: int = Field(ge=1, le=MAX_UNITS)
     spans: list[SourceSpan] = Field(min_length=1, max_length=MAX_UNITS * 2)
-    warnings: list[Literal["EMPTY_UNITS", "OCR_REQUIRED"]] = Field(max_length=2)
+    warnings: list[Literal["EMPTY_UNITS", "OCR_REQUIRED", "PARTIAL_EXTRACTION", "NO_USABLE_TEXT"]] = Field(max_length=4)
+    quality: ExtractionQuality | None = None
 
     @model_validator(mode="after")
     def check_manifest(self) -> "ExtractionResult":
@@ -50,4 +60,6 @@ class ExtractionResult(BaseModel):
             raise ValueError("Text exceeds limit")
         if self.status == "EXTRACTED" and not any(s.text.strip() for s in self.spans):
             raise ValueError("Empty extraction cannot succeed")
+        if self.status == "PARTIAL" and not (self.quality and self.quality.ocr_suspected_units):
+            raise ValueError("Partial extraction requires OCR-suspected units")
         return self

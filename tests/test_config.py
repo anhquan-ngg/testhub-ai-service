@@ -99,3 +99,28 @@ def test_router_rag_still_requires_google_embedding_key() -> None:
         Settings(llm_provider="9router", router_base_url="http://localhost:20128/v1",
                  router_api_key="fixture-key", router_model="provider/model",
                  rag_enabled=True, rag_database_url="postgresql://fixture")
+
+def test_fallback_and_grounded_deadline_config(monkeypatch) -> None:
+    base = {"gemini_api_key": "gemini-test-key", "llm_provider": "9router", "router_api_key": "router-test-key", "router_model": "m", "router_base_url": "http://127.0.0.1:20128/v1"}
+    assert Settings(**base).effective_grounded_timeout_ms == 75_000
+    assert Settings(**base, generation_timeout_ms=110_000).effective_grounded_timeout_ms == 125_000
+    assert Settings(**base, grounded_timeout_ms=90_000).effective_grounded_timeout_ms == 90_000
+    assert Settings(**base, llm_fallback_provider="gemini").llm_fallback_provider == "gemini"
+    for bad in (
+        {"llm_fallback_provider": "other"},
+        {"llm_fallback_provider": "gemini", "gemini_api_key": ""},
+        {"grounded_timeout_ms": 300_001},
+    ):
+        with pytest.raises(ValueError):
+            Settings(**{**base, **bad})
+    with pytest.raises(ValueError):
+        Settings(gemini_api_key="gemini-test-key", llm_fallback_provider="gemini")
+    monkeypatch.setenv("LLM_FALLBACK_PROVIDER", "gemini")
+    monkeypatch.setenv("GROUNDED_GENERATION_TIMEOUT_MS", "90000")
+    monkeypatch.setenv("LLM_PROVIDER", "9router")
+    monkeypatch.setenv("ROUTER_API_KEY", "router-test-key")
+    monkeypatch.setenv("ROUTER_MODEL", "m")
+    monkeypatch.setenv("ROUTER_BASE_URL", "http://127.0.0.1:20128/v1")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
+    loaded = Settings.from_env()
+    assert loaded.llm_fallback_provider == "gemini" and loaded.grounded_timeout_ms == 90_000

@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from app.repositories.windows_pool import SelectorRepository
 from uuid import uuid4
 
-from app.schemas.rag import (IndexCommand, IndexProgress, MAX_CONTEXT_BYTES, PrepareIndexRequest,
+from app.schemas.rag import (EvidenceDiagnostics, EvidenceIssue, IndexCommand, IndexProgress, MAX_CONTEXT_BYTES, PrepareIndexRequest,
     RetrievedChunk, RetrieveRequest, RetrieveResponse, current_profile)
 from app.services.chunking import chunk_document
 from app.services.embedding import EmbeddingProvider
@@ -126,7 +126,7 @@ class RagService:
             vectors = []
             for offset in range(0, len(queries), BATCH_SIZE):
                 vectors.extend(await self.embedding.embed(queries[offset:offset + BATCH_SIZE], "RETRIEVAL_QUERY"))
-            contexts, used = {}, 0
+            contexts, used, first_slot = {}, 0, 1
             for item, vector in zip(request.plan_items, vectors, strict=True):
                 candidates = await self.repository.search(request.owner_id, request.profile_id, request.index_ids, vector,
                     source_units=[{"index_id": str(request.index_ids[0]), **unit.model_dump()} for unit in item.source_units])
@@ -140,9 +140,20 @@ class RagService:
                     used += len(chunk.text.encode())
                     if len(chosen) == 2:
                         break
+                logger.info(
+                    "generation_retrieval mode=planned slot_start=%s slot_end=%s candidate_count=%s chunk_count=%s context_bytes=%s source_unit_count=%s",
+                    first_slot, first_slot + item.count - 1, len(candidates), len(chosen),
+                    sum(len(chunk.text.encode()) for chunk in chosen), len(item.source_units),
+                )
                 if not chosen:
-                    raise RagError("RAG_PLAN_ITEM_INSUFFICIENT_CONTEXT", 422)
+                    logger.warning("generation_insufficient_evidence mode=retrieval slot_start=%s slot_end=%s",
+                                   first_slot, first_slot + item.count - 1)
+                    raise RagError("RAG_INSUFFICIENT_EVIDENCE", diagnostics=EvidenceDiagnostics(issues=[
+                        EvidenceIssue(slot=slot, reason="NO_RETRIEVED_CONTEXT")
+                        for slot in range(first_slot, first_slot + item.count)
+                    ]))
                 contexts[item.id] = chosen
+                first_slot += item.count
             await self.repository.validate_scope(request.owner_id, request.profile_id, request.index_ids)
             return contexts
         except RagError:
