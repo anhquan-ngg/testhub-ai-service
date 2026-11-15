@@ -4,6 +4,24 @@
 tạo file local với tiêu đề và trạng thái đã xác minh trước khi đọc/cập nhật;
 không thêm file này vào Git. Quy tắc này áp dụng cho mọi yêu cầu đọc file bên dưới.
 
+## Grounded evidence refusals
+
+- Use RawGroundedGenerationOutcome only for internal provider output. Empty
+  questions are an evidence refusal, not a successful public response; successful
+  rag-generation.v1 still requires 1..20 questions. Text and embeddings do not change.
+- unsupported_slots contains unique 1-based slots within the request and reason
+  INSUFFICIENT_EVIDENCE. Never accept questions together with refusals. Invalid
+  metadata/schema, counts, answers and citations still fail RAG_OUTPUT_INVALID.
+- Valid refusals become nonretryable RAG_INSUFFICIENT_EVIDENCE (422); diagnostics
+  contain only issues [{slot, reason}]. Legacy empty lists have unknown slots
+  (issues:[]); do not invent them. Missing planned chunks use NO_RETRIEVED_CONTEXT
+  for the first deficient item's expanded slots before any provider call.
+- No semantic retry, partial success, automatic splitting or evidence-triggered
+  fallback. Preserve slot-scoped citations and UNASSESSED quality status.
+- Log only bounded sanitized schema field/type metadata and retrieval slot/count/
+  byte summaries. Never log validation input/message, arbitrary JSON keys, prompt,
+  source or model output. Keep the exported RAG OpenAPI synchronized.
+
 ## Source-wide knowledge plans (2026-10-25)
 
 - POST /internal/rag/outline reconstructs all authorized chunks, recognizes numbered chapter/section headings and proposes inferred page topics when no outline exists. These are editable heuristics, not validated semantic classifications.
@@ -162,7 +180,9 @@ testhub-ai-service/
 │   │   └── question_generator.py  # Điều phối provider, kiểm tra đầu ra
 │   ├── providers/
 │   │   ├── base.py                # Protocol chung cho LLM provider
-│   │   ├── gemini.py              # Provider đầu tiên cần hiện thực
+│   │   ├── gemini.py              # Provider mặc định (LLM_PROVIDER=gemini)
+│   │   ├── nine_router.py         # Adapter OpenAI-compatible cho 9Router (LLM_PROVIDER=9router)
+│   │   ├── factory.py             # Chọn provider theo LLM_PROVIDER, không fallback ngầm
 │   │   ├── openai.py              # Dự kiến sau MVP
 │   │   └── grok.py                # Dự kiến sau MVP
 │   ├── schemas/
@@ -184,7 +204,7 @@ testhub-ai-service/
 3. **Ingestion RAG:** NestJS kiểm tra quyền và lưu file trên S3/MinIO; AI service trích xuất PDF/DOCX/PPTX, giữ trang/slide, chia chunks, tạo embeddings, lưu vào `rag`. Chỉ đánh dấu tài liệu `READY` sau khi xử lý xong.
 4. **Generation RAG:** Truy xuất chunks trong danh sách tài liệu được phép, phân bổ nguồn để bao phủ nhiều mục kiến thức, sinh câu hỏi kèm tham chiếu nguồn; NestJS kiểm duyệt và chỉ lưu câu được duyệt.
 
-Contract văn bản `text-generation.v1` đã thống nhất qua `contracts/text-generation.v1.json` và fixture tương ứng ở NestJS. Backend dùng `X-Internal-Token`, deadline mặc định 35000 ms và một HTTP invocation; Python giữ deadline 30000 ms/retry SDK. `AI_SERVICE_INTERNAL_TOKEN` của NestJS phải trùng `INTERNAL_API_TOKEN`, dùng 32–256 ký tự ASCII nhìn thấy được để tương thích HTTP header. Batch/persistence, chuyển file và schema RAG chưa triển khai. Đối chiếu `../testhub-v2-backend/docs/ai-question-generation.md` khi đổi contract; cập nhật cả hai fixture và type frontend.
+Contract văn bản `text-generation.v1` đã thống nhất qua `contracts/text-generation.v1.json` và fixture tương ứng ở NestJS. Backend dùng `X-Internal-Token`, deadline mặc định 35000 ms và một HTTP invocation; Python giữ deadline 30000 ms/retry SDK (mặc định; cấu hình được qua `GENERATION_TIMEOUT_MS`, `ROUTER_TIMEOUT_MS`, `GROUNDED_GENERATION_TIMEOUT_MS`, và chuỗi deadline phải lồng nhau với `AI_SERVICE_TIMEOUT_MS`). `LLM_FALLBACK_PROVIDER=gemini` (opt-in) chỉ fallback khi primary không khả dụng (kết nối/429/5xx), không fallback khi timeout hoặc output không hợp lệ. `AI_SERVICE_INTERNAL_TOKEN` của NestJS phải trùng `INTERNAL_API_TOKEN`, dùng 32–256 ký tự ASCII nhìn thấy được để tương thích HTTP header. Batch/persistence, chuyển file và schema RAG chưa triển khai. Đối chiếu `../testhub-v2-backend/docs/ai-question-generation.md` khi đổi contract; cập nhật cả hai fixture và type frontend.
 
 ## 5. Quy ước khi triển khai
 
@@ -192,7 +212,7 @@ Contract văn bản `text-generation.v1` đã thống nhất qua `contracts/text
 - Router chỉ nhận/kiểm tra request và gọi service. Parser, retrieval, prompt và provider ở đúng module riêng.
 - Lifespan sở hữu settings và Gemini client dùng chung cho mỗi process; không đọc env hoặc tạo connection pool cho từng request. Service quản lý semaphore và deadline tổng; API dependencies xử lý token, exception handler tập trung ánh xạ lỗi HTTP.
 - Retry SDK có giới hạn qua `GEMINI_MAX_ATTEMPTS`, nằm trong deadline `GENERATION_TIMEOUT_MS`; timeout phải trả 504 và giải phóng suất xử lý. Log upstream chỉ ghi loại exception/mã HTTP/giai đoạn, không log message hoặc traceback chứa dữ liệu nguồn. Cleanup client không được che lỗi request.
-- `providers/base.py` là contract chung cho các LLM; Gemini là provider đầu tiên. Tách embedding khỏi LLM provider.
+- `providers/base.py` là contract chung cho các LLM; `LLM_PROVIDER` chọn `gemini` (mặc định) hoặc `9router` (`providers/nine_router.py`, httpx không streaming, `ROUTER_*`), không fallback ngầm. Validation đầu ra vẫn nằm ở `QuestionGenerator`. Tách embedding khỏi LLM provider: RAG vẫn dùng `GEMINI_API_KEY`.
 - Kiểm tra cấu trúc và ngữ nghĩa tối thiểu của đầu ra: số câu, loại/mức nhận thức hợp lệ, số phương án, đúng một đáp án cho câu `SINGLE_CHOICE` và 2–3 đáp án cho `MULTIPLE_CHOICE` theo từng vị trí cấu hình, câu rỗng/trùng. JSON hợp lệ chưa chứng minh câu hỏi đúng kiến thức; giảng viên vẫn phải duyệt.
 - Sinh câu hỗ trợ **một đáp án và nhiều đáp án** theo `question_configs`, văn bản qua API cũ và PDF/PPTX qua RAG có trích dẫn.
   DOCX, provider khác và OCR là bước sau. Giữ `text-generation.v1` tương thích.

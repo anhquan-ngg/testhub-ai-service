@@ -9,6 +9,9 @@ class ProviderError(ServiceError):
     """An upstream model call failed without exposing its request or key."""
 
 
+class ProviderUnavailableError(ProviderError):
+    """The upstream could not be reached or rejected the call for capacity (429/5xx)."""
+
 class ProviderTimeoutError(ProviderError):
     """An upstream model call exceeded its configured timeout."""
 

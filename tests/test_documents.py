@@ -85,8 +85,11 @@ def test_exported_contract_matches_production_route():
 def test_empty_pdf_requires_ocr(client):
     response = extract(client, pdf_bytes(blank=True))
     assert response.status_code == 200
-    assert response.json()["status"] == "OCR_REQUIRED"
-    assert "OCR_REQUIRED" in response.json()["warnings"]
+    result = response.json()
+    assert result["status"] == "OCR_REQUIRED"
+    # A blank source is not an OCR candidate: no image was found on any page.
+    assert "NO_USABLE_TEXT" in result["warnings"] and "OCR_REQUIRED" not in result["warnings"]
+    assert result["quality"] == {"total_units": 1, "text_units": 0, "ocr_suspected_units": [], "blank_units": [1]}
 
 
 def test_mixed_pdf_keeps_text_but_flags_image_only_page(client):
@@ -111,6 +114,61 @@ def test_mixed_pdf_keeps_text_but_flags_image_only_page(client):
     assert result["spans"][0]["text"] == "Stack uses LIFO."
     assert result["spans"][1] == {"kind": "PAGE", "position": 2, "text": ""}
 
+
+def mixed_pdf(text_pages, image_pages_first=True):
+    """Cover (image only) followed by text pages, as in a scanned-cover course PDF."""
+    from pypdf.generic import NumberObject
+    writer = PdfWriter()
+    font = DictionaryObject({NameObject("/Type"): NameObject("/Font"),
+        NameObject("/Subtype"): NameObject("/Type1"), NameObject("/BaseFont"): NameObject("/Helvetica")})
+
+    def image_page():
+        page = writer.add_blank_page(width=100, height=100)
+        image = DecodedStreamObject()
+        image.set_data(b"\xff\xff\xff")
+        image.update({NameObject("/Type"): NameObject("/XObject"), NameObject("/Subtype"): NameObject("/Image"),
+                      NameObject("/Width"): NumberObject(1), NameObject("/Height"): NumberObject(1),
+                      NameObject("/ColorSpace"): NameObject("/DeviceRGB"), NameObject("/BitsPerComponent"): NumberObject(8)})
+        page[NameObject("/Resources")] = DictionaryObject({NameObject("/XObject"): DictionaryObject({NameObject("/Im0"): writer._add_object(image)})})
+        content = DecodedStreamObject()
+        content.set_data(b"q 100 0 0 100 0 0 cm /Im0 Do Q")
+        page[NameObject("/Contents")] = writer._add_object(content)
+
+    def text_page(text):
+        page = writer.add_blank_page(width=600, height=800)
+        page[NameObject("/Resources")] = DictionaryObject({NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})})
+        stream = DecodedStreamObject()
+        stream.set_data(f"BT /F1 12 Tf 30 700 Td ({text}) Tj ET".encode())
+        page[NameObject("/Contents")] = writer._add_object(stream)
+
+    if image_pages_first:
+        image_page()
+    for text in text_pages:
+        text_page(text)
+    target = io.BytesIO()
+    writer.write(target)
+    return target.getvalue()
+
+def test_cover_only_gap_with_substantial_text_is_partial(client):
+    body = "Normalization removes redundancy by decomposing relations. " * 4
+    result = extract(client, mixed_pdf([body, body, body])).json()
+    assert result["status"] == "PARTIAL"
+    assert result["unit_count"] == 4
+    assert result["spans"][0] == {"kind": "PAGE", "position": 1, "text": ""}
+    assert result["quality"] == {"total_units": 4, "text_units": 3, "ocr_suspected_units": [1], "blank_units": []}
+    assert result["warnings"] == ["EMPTY_UNITS", "PARTIAL_EXTRACTION"]
+    assert result["parser_version"].endswith(";text/v2")
+
+def test_header_footer_sized_text_is_not_enough_for_partial(client):
+    result = extract(client, mixed_pdf(["Page header", "Page footer"])).json()
+    assert result["status"] == "OCR_REQUIRED"
+    assert result["warnings"] == ["EMPTY_UNITS", "OCR_REQUIRED"]
+    assert result["quality"]["ocr_suspected_units"] == [1]
+
+def test_fully_texted_pdf_has_clean_quality(client):
+    result = extract(client, pdf_bytes()).json()
+    assert result["quality"] == {"total_units": 1, "text_units": 1, "ocr_suspected_units": [], "blank_units": []}
+    assert result["warnings"] == []
 
 def test_mixed_pptx_flags_image_inside_group(client):
     from PIL import Image
@@ -347,6 +405,50 @@ def test_threaded_spawn_cancellation_retains_and_reaps_child(monkeypatch, caplog
 
     asyncio.run(run())
 
+
+def test_aclose_waits_for_late_spawn_cleanup(monkeypatch):
+    original = subprocess.Popen
+    entered, release = threading.Event(), threading.Event()
+    children, folders = [], []
+
+    async def unsupported(*args, **kwargs):
+        raise NotImplementedError
+
+    def delayed_spawn(args, **kwargs):
+        folders.append(Path(args[4]).parent)
+        entered.set()
+        assert release.wait(5)
+        child = original([sys.executable, "-c", "import time; time.sleep(10)"], **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", unsupported)
+    monkeypatch.setattr(subprocess, "Popen", delayed_spawn)
+
+    async def stream():
+        yield pdf_bytes()
+
+    async def run():
+        parser = DocumentParser(timeout_seconds=5, max_concurrency=1)
+        active = asyncio.create_task(parser.extract(stream(), "PDF", False))
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            active.cancel()
+            await asyncio.gather(active, return_exceptions=True)
+            assert parser._cleanup_tasks and not children
+            closing = asyncio.create_task(parser.aclose())
+            await asyncio.sleep(0.05)
+            assert not closing.done()
+            release.set()
+            await asyncio.wait_for(closing, 3)
+            assert len(children) == 1 and children[0].poll() is not None
+            assert not parser._cleanup_tasks and not folders[0].exists()
+            assert parser._slots._value == 1
+        finally:
+            release.set()
+            await parser.aclose()
+
+    asyncio.run(run())
 
 def test_parser_child_receives_only_minimal_environment(monkeypatch):
     original = asyncio.create_subprocess_exec

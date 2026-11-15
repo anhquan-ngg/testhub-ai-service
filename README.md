@@ -109,6 +109,24 @@ Nếu `.venv` đã được tạo bằng phiên bản Python khác, hãy tạo l
 
 `GET /health` trả `{"status":"ok"}` mà không gọi Gemini. Swagger UI ở `http://127.0.0.1:8000/docs`. Chỉ bind `127.0.0.1` khi phát triển local; trong Docker, chỉ kết nối service này qua mạng nội bộ.
 
+### Dùng 9Router làm LLM sinh câu hỏi
+
+Mặc định `LLM_PROVIDER=gemini`. Để sinh câu hỏi qua [9Router](https://github.com/decolua/9router) (OpenAI-compatible, `POST {ROUTER_BASE_URL}/chat/completions`, không streaming), đặt trong `.env`:
+
+```dotenv
+LLM_PROVIDER=9router
+ROUTER_BASE_URL=http://127.0.0.1:20128/v1
+ROUTER_API_KEY=<key tạo trong dashboard 9Router>
+ROUTER_MODEL=<model hoặc combo trong 9Router>
+```
+
+- `ROUTER_BASE_URL` phải là `http(s)://host[:port]/v1`, không chứa thông tin đăng nhập, query hay fragment. Trong Docker, `127.0.0.1` là chính container; dùng hostname/mạng nội bộ tới 9Router.
+- `ROUTER_TIMEOUT_MS` (mặc định 30000, 1–120000), `ROUTER_MAX_ATTEMPTS` (mặc định 1, 1–5; chỉ retry `408/429/500/502/503/504` và nằm trong `GENERATION_TIMEOUT_MS`), `ROUTER_MAX_OUTPUT_TOKENS` (mặc định 16384, 1–65536).
+- `ROUTER_RESPONSE_FORMAT=json_schema` (mặc định, strict) hoặc `json_object` (schema nhúng trong prompt) nếu model/upstream không hỗ trợ `json_schema`.
+- Kiểm tra số câu, đáp án, trích dẫn và contract NestJS/frontend không đổi. Quay lại Gemini bằng `LLM_PROVIDER=gemini`; không có fallback tự động.
+- **Embedding/RAG không đi qua 9Router**: `RAG_ENABLED=true` vẫn cần `GEMINI_API_KEY` và `RAG_DATABASE_URL`. Đổi LLM không cần reindex.
+- `/health` không chứng minh 9Router khả dụng; hãy chạy một lần smoke test bằng dữ liệu giả sau khi cấu hình.
+
 ## Contract `POST /internal/generate`
 
 Header bắt buộc: `X-Internal-Token: <INTERNAL_API_TOKEN>`.
@@ -151,7 +169,7 @@ Ví dụ kết quả:
 
 `question_text`, `options`, `question_type`, `question_format` và `correct_answer` dùng các tên trường của ngân hàng câu hỏi TestHub; khi tích hợp NestJS cần chuyển mảng `options` thành chuỗi JSON theo schema backend. Prototype gọi Gemini trong backend đã được gỡ; Python service là nơi thực hiện sinh câu hỏi. Service kiểm tra số câu, bốn lựa chọn khác nhau, số đáp án đúng theo loại câu ở từng vị trí (`SINGLE_CHOICE` đúng 1, `MULTIPLE_CHOICE` 2–3), độ dài và câu hỏi trùng. Việc kiểm chứng nội dung với tài liệu và duyệt cuối vẫn thuộc giảng viên/backend.
 
-Mã lỗi chính: `401` token thiếu/sai; `422` request sai; `503` thiếu cấu hình hoặc hết năng lực xử lý; `502` Gemini lỗi hoặc JSON không hợp lệ; `504` Gemini timeout. Nội dung lỗi upstream không chứa API key, prompt hay đoạn văn bản.
+Mã lỗi chính: `401` token thiếu/sai; `422` request sai; `503` thiếu cấu hình hoặc hết năng lực xử lý; `502` Gemini/9Router lỗi hoặc JSON không hợp lệ; `504` Gemini/9Router timeout. Nội dung lỗi upstream không chứa API key, prompt hay đoạn văn bản.
 
 ## Cấu hình và xử lý lỗi
 
@@ -195,6 +213,40 @@ deadline riêng (Python 45s, NestJS mặc định 55s).
 Test dùng provider giả lập và SDK thật với `httpx.MockTransport`, không cần key thật và không gọi mạng. Chúng kiểm tra contract, token ngoài ASCII, topic rỗng, JSON đầu ra, timeout, deadline/cancellation, concurrency, retry hữu hạn, vòng đời client và log an toàn. Lời gọi Gemini thật cần key hợp lệ; service không tự thực hiện smoke test thật.
 
 ## Khắc phục lỗi RAG
+
+### Grounded generation returns 422: insufficient evidence
+
+A valid model refusal is not malformed JSON. Grounded prompts use an internal
+outcome `{questions:[], unsupported_slots:[{slot:2, reason:"INSUFFICIENT_EVIDENCE"}]}`
+when any requested slot lacks support. Slots are 1-based in frozen-plan order,
+expanded by each item's count. The common parser checks unique, in-request slot
+numbers; legacy `{"questions":[]}` is accepted as an unspecified refusal.
+
+These outcomes return `RAG_INSUFFICIENT_EVIDENCE` (HTTP 422, not retryable), with
+optional `detail.diagnostics.issues` containing only slot and reason. An empty
+issues list means the deficient slots are unknown. Planned retrieval with no
+selected chunks returns the same code before calling the model, identifying the
+first deficient item's slots with `NO_RETRIEVED_CONTEXT`.
+
+NestJS maps this and older context-shortage codes to `AI_INSUFFICIENT_EVIDENCE`,
+persists sanitized failure details and exposes them on the owned batch detail.
+The vi/en UI explains known slots from the frozen plan, or explicitly says the
+slots are unknown. No drafts, automatic semantic retries, fallback or automatic
+batch splitting occur. Review objectives, cognitive levels, question formats and
+source pages before creating a new batch; fewer questions alone do not prove
+there is enough evidence. Existing FAILED batches are not rewritten.
+
+Malformed JSON/schema, contradictory partial questions/refusals, invalid slot
+numbers, wrong nonempty counts, answers or citations remain `RAG_OUTPUT_INVALID`
+(502). Public successful `rag-generation.v1` responses still require 1..20
+questions; text generation and Google embeddings are unchanged. Quote checks
+prove source matching, not semantic correctness (`UNASSESSED`).
+
+Retrieval logs include only slot ranges, candidate/chunk counts, context bytes
+and source-unit counts. Schema logs include error counts and at most five
+sanitized field locations/types, never inputs, messages, arbitrary JSON keys,
+source content or model output. No additional paid generation call is made to
+repair a refusal.
 
 ### Planned generation returns 502
 
@@ -272,7 +324,7 @@ app/
 ├── config.py
 ├── errors.py
 ├── api/{generation,documents,rag,dependencies,errors}.py
-├── providers/{base,gemini}.py
+├── providers/{base,gemini,nine_router,factory}.py
 ├── schemas/{question,document,rag,grounded_generation}.py
 ├── services/{prompt_builder,question_generator,document_parser,document_parser_worker}.py
 ├── services/{chunking,embedding,retrieval,rag_errors,grounded_generation}.py

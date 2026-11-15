@@ -47,6 +47,13 @@ def test_missing_outline_proposes_reviewable_page_topics_including_late_pages():
     assert all(node.origin=='INFERRED' for node in result.nodes)
 
 
+def test_same_named_chapter_and_section_roots_are_disambiguated_not_merged():
+    result=outline(['Part 2: Normalization\nFirst normal form.','3. Normalization\nSecond normal form.'])
+    roots=[node for node in result.nodes if node.parent_id is None]
+    assert len(roots)==2
+    assert len({node.name.casefold() for node in roots})==2
+    assert 'DUPLICATE_TOPIC_NAMES_DISAMBIGUATED' in result.warnings
+
 @pytest.mark.parametrize("title", ['Phần cứng máy tính', 'Partition tables', 'Chapter iv: Topic', 'Chapter IVORY', 'Chapter 12abc'])
 def test_non_headings_do_not_match_chapter_prefixes(title):
     result = outline([title + '\nExplanation of the topic.'])
@@ -182,6 +189,47 @@ def planned():
         yield client,provider,repo,req,body,headers
 
 
+@pytest.mark.parametrize('unsupported_slots', [None, [], [{'slot': 2, 'reason': 'INSUFFICIENT_EVIDENCE'}]])
+def test_evidence_refusal_is_actionable_without_retry_or_source_leaks(planned, monkeypatch, caplog, unsupported_slots):
+    client,provider,_,_,body,headers=planned
+    async def refuse(prompt):
+        provider.calls+=1
+        payload={'questions':[]}
+        if unsupported_slots is not None:
+            payload['unsupported_slots']=unsupported_slots
+        return json.dumps(payload)
+    monkeypatch.setattr(provider,'generate_grounded',refuse)
+    response=client.post('/internal/rag/generate',headers=headers,json=body)
+    assert response.status_code==422
+    assert response.json()['detail']=={
+        'code':'RAG_INSUFFICIENT_EVIDENCE','retryable':False,
+        'diagnostics':{'issues':unsupported_slots or []},
+    }
+    assert provider.calls==1
+    assert 'generation_insufficient_evidence mode=planned' in caplog.text
+    for private in ['Stack','Queue',headers['X-Internal-Token']]:
+        assert private not in caplog.text and private not in response.text
+
+@pytest.mark.parametrize('issues', [
+    [{'slot':3,'reason':'INSUFFICIENT_EVIDENCE'}],
+    [{'slot':True,'reason':'INSUFFICIENT_EVIDENCE'}],
+    [{'slot':1,'reason':'private-provider-output'}],
+    [{'slot':1,'reason':'INSUFFICIENT_EVIDENCE','source':'private-provider-output'}],
+    [{'slot':1,'reason':'INSUFFICIENT_EVIDENCE'}]*2,
+])
+def test_refusal_rejects_untrusted_or_out_of_request_slot_metadata(planned, monkeypatch, caplog, issues):
+    client,provider,_,_,body,headers=planned
+    async def refuse(prompt):
+        provider.calls+=1
+        return json.dumps({'questions':[], 'unsupported_slots':issues})
+    monkeypatch.setattr(provider,'generate_grounded',refuse)
+    response=client.post('/internal/rag/generate',headers=headers,json=body)
+    assert response.status_code==502
+    assert response.json()['detail']=={'code':'RAG_OUTPUT_INVALID','retryable':False}
+    assert provider.calls==1
+    assert 'private-provider-output' not in caplog.text+response.text
+
+
 def test_each_cell_uses_own_sources_and_server_assigns_plan_ids(planned):
     client,provider,_,_,body,headers=planned
     result=client.post('/internal/rag/generate',headers=headers,json=body)
@@ -222,6 +270,7 @@ def test_cannot_borrow_another_cells_evidence(planned):
 @pytest.mark.parametrize('failure,reason', [
     ('json', 'schema'),
     ('schema', 'schema'),
+    ('extra', 'schema'),
     ('duplicate_invalid_quote', 'quote_mismatch'),
     ('unknown', 'unknown_chunk'),
     ('quote', 'quote_mismatch'),
@@ -236,6 +285,8 @@ def test_planned_invalid_output_logs_reason_without_source_or_provider_data(plan
         question=result['questions'][0]
         if failure=='schema':
             question['question_text']={'private-provider-output':'not a string'}
+        elif failure=='extra':
+            result['private-provider-output']='not an allowed field'
         elif failure=='duplicate_invalid_quote':
             question['citations'].append({**question['citations'][0], 'quote':'private-provider-output: unsupported quote'})
         elif failure=='unknown':
@@ -249,6 +300,10 @@ def test_planned_invalid_output_logs_reason_without_source_or_provider_data(plan
     assert response.json()['detail']=={'code':'RAG_OUTPUT_INVALID','retryable':False}
     assert provider.calls==1
     assert f'generation_invalid_output reason={reason} mode=planned' in caplog.text
+    if failure=='schema':
+        assert 'error_count=1 errors=questions.0.question_text:string_type' in caplog.text
+    if failure=='extra':
+        assert 'error_count=1 errors=field:extra_forbidden' in caplog.text
     if reason!='schema':
         assert 'slot=1' in caplog.text
     for private in ['Stack','Queue','private-provider-output',headers['X-Internal-Token']]:
@@ -278,11 +333,21 @@ def test_planned_repeated_chunk_references_keep_all_verified_evidence(planned, m
     assert provider.calls==1
 
 
-def test_missing_cell_never_falls_back_and_foreign_scope_never_calls_model(planned):
+@pytest.mark.parametrize('count',[1,2])
+def test_missing_cell_never_falls_back_and_foreign_scope_never_calls_model(planned,caplog,count):
     client,provider,_,_,body,headers=planned
+    caplog.set_level('INFO',logger='app.services.retrieval')
     body['plan_items'][1]['source_units'][0]['position']=99
+    body['plan_items'][1]['count']=count
+    body['question_configs']=[dict(config) for config in body['question_configs']]
+    body['question_configs'][1]['count']=count
     response=client.post('/internal/rag/generate',headers=headers,json=body)
     assert response.status_code==422,response.text
+    assert response.json()['detail']=={'code':'RAG_INSUFFICIENT_EVIDENCE','retryable':False,
+        'diagnostics':{'issues':[{'slot':slot,'reason':'NO_RETRIEVED_CONTEXT'} for slot in range(2,2+count)]}}
+    assert 'generation_retrieval mode=planned slot_start=1 slot_end=1' in caplog.text
+    assert 'chunk_count=0 context_bytes=0' in caplog.text
+    assert all(value not in caplog.text for value in ['Stack','Queue','Explain',headers['X-Internal-Token']])
     assert provider.calls==0
     body['owner_id']=str(uuid4())
     assert client.post('/internal/rag/generate',headers=headers,json=body).status_code==404

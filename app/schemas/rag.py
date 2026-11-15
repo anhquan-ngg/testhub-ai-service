@@ -24,9 +24,23 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
+class EvidenceIssue(StrictModel):
+    slot: int = Field(ge=1, le=20)
+    reason: Literal["INSUFFICIENT_EVIDENCE", "NO_RETRIEVED_CONTEXT"]
+
+class EvidenceDiagnostics(StrictModel):
+    issues: list[EvidenceIssue] = Field(max_length=20)
+
+    @model_validator(mode="after")
+    def unique_slots(self) -> Self:
+        if len({issue.slot for issue in self.issues}) != len(self.issues):
+            raise ValueError("Duplicate evidence slot")
+        return self
+
 class RagErrorDetail(StrictModel):
     code: str
     retryable: bool
+    diagnostics: EvidenceDiagnostics | None = None
 
 
 class RagErrorResponse(StrictModel):

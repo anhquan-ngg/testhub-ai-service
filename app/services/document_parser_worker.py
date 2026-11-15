@@ -10,10 +10,14 @@ import zipfile
 from pathlib import Path
 
 from app.schemas.document import (
-    ExtractionResult, MAX_FILE_BYTES, MAX_RESULT_BYTES, MAX_TEXT_CHARS,
+    ExtractionQuality, ExtractionResult, MAX_FILE_BYTES, MAX_RESULT_BYTES, MAX_TEXT_CHARS,
     MAX_UNITS, SourceSpan,
 )
 
+
+# Header/footer-only text is not evidence of a usable source.
+MIN_USEFUL_CHARS = 200
+MIN_USEFUL_UNITS = 2
 
 class DocumentRejected(Exception):
     """Only an allowlisted error code may cross the process boundary."""
@@ -61,7 +65,7 @@ def extract(path: Path, source_type: str, include_notes: bool) -> ExtractionResu
     if not data or len(data) > MAX_FILE_BYTES:
         raise DocumentRejected("DOCUMENT_LIMIT_EXCEEDED")
     spans: list[SourceSpan] = []
-    needs_ocr = False
+    ocr_suspected: list[int] = []
     chars = 0
 
     def add(kind: str, position: int, text: str) -> None:
@@ -89,7 +93,7 @@ def extract(path: Path, source_type: str, include_notes: bool) -> ExtractionResu
             add("PAGE", number, text)
             # Conservatively flag image-only pages even in a mixed PDF.
             if not text.strip() and bool(page.images):
-                needs_ocr = True
+                ocr_suspected.append(number)
     elif source_type == "PPTX":
         from pptx import Presentation
         from pptx.shapes.picture import Picture
@@ -118,24 +122,35 @@ def extract(path: Path, source_type: str, include_notes: bool) -> ExtractionResu
             text = "\n".join(shape_text(slide.shapes))
             add("SLIDE", number, text)
             if not text.strip() and contains_image(slide.shapes):
-                needs_ocr = True
+                ocr_suspected.append(number)
             if include_notes and slide.has_notes_slide:
                 frame = slide.notes_slide.notes_text_frame
                 if frame is not None and frame.text.strip():
                     add("NOTES", number, frame.text)
     else:
         raise DocumentRejected("DOCUMENT_INVALID")
-    if not any(span.text for span in spans):
-        needs_ocr = True
-    empty = any(not span.text for span in spans if span.kind != "NOTES")
+    base = [span for span in spans if span.kind != "NOTES"]
+    text_units = [span.position for span in base if span.text]
+    blank = [span.position for span in base if not span.text and span.position not in ocr_suspected]
+    useful_chars = sum(len("".join(span.text.split())) for span in base)
+    useful = len(text_units) >= MIN_USEFUL_UNITS and useful_chars >= MIN_USEFUL_CHARS
+    if not ocr_suspected:
+        # No unit looks scanned. Text-less sources stay blocked, but are not OCR candidates.
+        status = "EXTRACTED" if any(span.text for span in spans) else "OCR_REQUIRED"
+        warnings = ["NO_USABLE_TEXT"] if status == "OCR_REQUIRED" else []
+    elif useful:
+        status, warnings = "PARTIAL", ["PARTIAL_EXTRACTION"]
+    else:
+        status, warnings = "OCR_REQUIRED", ["OCR_REQUIRED"]
+    if blank or ocr_suspected:
+        warnings = ["EMPTY_UNITS"] + warnings
     return ExtractionResult(
         source_type=source_type, source_sha256=hashlib.sha256(data).hexdigest(),
-        parser_version=f"{source_type.lower()}/{version('pypdf' if source_type == 'PDF' else 'python-pptx')};text/v1",
-        include_notes=include_notes, unit_count=count, spans=spans,
-        status="OCR_REQUIRED" if needs_ocr else "EXTRACTED",
-        warnings=(["EMPTY_UNITS"] if empty else []) + (["OCR_REQUIRED"] if needs_ocr else []),
+        parser_version=f"{source_type.lower()}/{version('pypdf' if source_type == 'PDF' else 'python-pptx')};text/v2",
+        include_notes=include_notes, unit_count=count, spans=spans, status=status, warnings=warnings,
+        quality=ExtractionQuality(total_units=count, text_units=len(text_units),
+                                  ocr_suspected_units=ocr_suspected, blank_units=blank),
     )
-
 
 def main() -> None:
     """Apply POSIX memory/CPU caps before importing third-party parsers."""

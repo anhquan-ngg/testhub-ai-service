@@ -971,6 +971,91 @@
   },
   "components": {
     "schemas": {
+      "EvidenceDiagnostics": {
+        "properties": {
+          "issues": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceIssue"
+            },
+            "type": "array",
+            "maxItems": 20,
+            "title": "Issues"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "issues"
+        ],
+        "title": "EvidenceDiagnostics"
+      },
+      "EvidenceIssue": {
+        "properties": {
+          "slot": {
+            "type": "integer",
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Slot"
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "INSUFFICIENT_EVIDENCE",
+              "NO_RETRIEVED_CONTEXT"
+            ],
+            "title": "Reason"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "slot",
+          "reason"
+        ],
+        "title": "EvidenceIssue"
+      },
+      "ExtractionQuality": {
+        "properties": {
+          "total_units": {
+            "type": "integer",
+            "maximum": 500.0,
+            "minimum": 1.0,
+            "title": "Total Units"
+          },
+          "text_units": {
+            "type": "integer",
+            "maximum": 500.0,
+            "minimum": 0.0,
+            "title": "Text Units"
+          },
+          "ocr_suspected_units": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "maxItems": 500,
+            "title": "Ocr Suspected Units"
+          },
+          "blank_units": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "maxItems": 500,
+            "title": "Blank Units"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "total_units",
+          "text_units",
+          "ocr_suspected_units",
+          "blank_units"
+        ],
+        "title": "ExtractionQuality",
+        "description": "Per-unit text classification; positions are original page/slide numbers."
+      },
       "ExtractionResult": {
         "properties": {
           "contract_version": {
@@ -1007,6 +1092,7 @@
             "type": "string",
             "enum": [
               "EXTRACTED",
+              "PARTIAL",
               "OCR_REQUIRED"
             ],
             "title": "Status"
@@ -1031,12 +1117,24 @@
               "type": "string",
               "enum": [
                 "EMPTY_UNITS",
-                "OCR_REQUIRED"
+                "OCR_REQUIRED",
+                "PARTIAL_EXTRACTION",
+                "NO_USABLE_TEXT"
               ]
             },
             "type": "array",
-            "maxItems": 2,
+            "maxItems": 4,
             "title": "Warnings"
+          },
+          "quality": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExtractionQuality"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "additionalProperties": false,
@@ -1735,6 +1833,16 @@
           "retryable": {
             "type": "boolean",
             "title": "Retryable"
+          },
+          "diagnostics": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EvidenceDiagnostics"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "additionalProperties": false,
