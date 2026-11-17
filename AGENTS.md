@@ -66,7 +66,9 @@ không thêm file này vào Git. Quy tắc này áp dụng cho mọi yêu cầu 
 - Citations include original source chunks/positions/hashes. UNASSESSED is explicit:
   quote matching does not establish answer entailment, factual accuracy or full-file
   coverage. Never fabricate citations or fall back to general knowledge.
-- Total grounded deadline 75s; NestJS uses 85s. Generation shares the existing
+- Grounded deadline defaults to max(75000, GENERATION_TIMEOUT_MS + 15000) ms.
+  Nonzero GROUNDED_GENERATION_TIMEOUT_MS must preserve that 15000 ms headroom;
+  the NestJS outer deadline must be longer. Generation shares the existing
   semaphore/client and bounded SDK retries. No Python bank/business writes.
 - Export contracts/rag-indexing.openapi.json after route/schema changes. Tests use
   synthetic providers or real SDK HTTP against local Postman fixtures, never real

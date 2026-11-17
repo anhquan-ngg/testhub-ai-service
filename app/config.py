@@ -72,6 +72,8 @@ class Settings:
         for name, (minimum, maximum) in bounds.items():
             if not minimum <= getattr(self, name) <= maximum:
                 raise ValueError(f"{name.upper()} must be between {minimum} and {maximum}")
+        if self.grounded_timeout_ms and self.grounded_timeout_ms < self.generation_timeout_ms + 15_000:
+            raise ValueError("GROUNDED_GENERATION_TIMEOUT_MS must be at least GENERATION_TIMEOUT_MS + 15000")
 
     @property
     def effective_grounded_timeout_ms(self) -> int:

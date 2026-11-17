@@ -122,7 +122,9 @@ def test_json_object_mode_embeds_schema_in_prompt() -> None:
     assert "questions" in seen[0]["messages"][0]["content"]
 
 
-def test_retries_503_then_succeeds(monkeypatch) -> None:
+@pytest.mark.parametrize("status", [503, 408])
+def test_retries_then_succeeds(monkeypatch: pytest.MonkeyPatch, status: int) -> None:
+    """Retryable availability errors and timeouts can still recover successfully."""
     async def no_sleep(_delay):
         return None
 
@@ -133,7 +135,7 @@ def test_retries_503_then_succeeds(monkeypatch) -> None:
         nonlocal calls
         calls += 1
         if calls == 1:
-            return httpx.Response(503, json={"error": "busy"})
+            return httpx.Response(status, json={"error": "busy"})
         return completion()
 
     assert post(replace(SETTINGS, router_max_attempts=3), handler).status_code == 200
@@ -188,6 +190,46 @@ def test_transport_timeout_returns_504(error) -> None:
     assert "secret" not in response.text
     assert "9Router" in response.text
 
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("operation", ["generate", "generate_grounded"])
+@pytest.mark.parametrize("first,last", [
+    (408, 503), (504, httpx.ConnectError),
+    (httpx.ReadTimeout, 503), (httpx.ConnectTimeout, 401),
+])
+async def test_timeout_survives_later_failure_without_fallback(
+    monkeypatch: pytest.MonkeyPatch, operation: str,
+    first: int | type[httpx.TransportError], last: int | type[httpx.TransportError],
+) -> None:
+    """A later failure cannot turn an earlier timeout into fallback eligibility."""
+    from unittest.mock import AsyncMock
+    from app.providers.fallback import FallbackProvider
+
+    sleep = AsyncMock()
+    monkeypatch.setattr("app.providers.nine_router.asyncio.sleep", sleep)
+    failures = iter([first, last])
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        failure = next(failures)
+        if isinstance(failure, int):
+            return httpx.Response(failure)
+        raise failure("private failure", request=request)
+
+    primary = NineRouterProvider(replace(SETTINGS, router_max_attempts=3 if last == 401 else 2),
+                                 transport=httpx.MockTransport(handler))
+    fallback = AsyncMock()
+    try:
+        with pytest.raises(ProviderTimeoutError):
+            await getattr(FallbackProvider(primary, fallback), operation)("prompt")
+        assert calls == 2
+        sleep.assert_awaited_once_with(0.5)
+        fallback.generate.assert_not_awaited()
+        fallback.generate_grounded.assert_not_awaited()
+    finally:
+        await primary.aclose()
 
 def test_connect_error_returns_502() -> None:
     def handler(request):

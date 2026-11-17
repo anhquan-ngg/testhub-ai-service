@@ -25,8 +25,11 @@
 - Citations include original source chunks/positions/hashes. UNASSESSED is explicit:
   quote matching does not establish answer entailment, factual accuracy or full-file
   coverage. Never fabricate citations or fall back to general knowledge.
-- Total grounded deadline 75s; NestJS uses 85s. Generation shares the existing
-  semaphore/client and bounded SDK retries. No Python bank/business writes.
+- Grounded deadline defaults to `max(75000, GENERATION_TIMEOUT_MS + 15000)` ms.
+  A nonzero `GROUNDED_GENERATION_TIMEOUT_MS` override must be at least
+  `GENERATION_TIMEOUT_MS + 15000`; zero keeps the derived default. Keep the NestJS
+  outer deadline longer. Generation shares the existing semaphore/client and
+  bounded SDK retries. No Python bank/business writes.
 - Export contracts/rag-indexing.openapi.json after route/schema changes. Tests use
   synthetic providers or real SDK HTTP against local Postman fixtures, never real
   keys/documents. Backend/Next.js now accept attached PDFs/PPTX and retain evidence
@@ -43,6 +46,16 @@
 - Use the same PostgreSQL DB with dedicated `testhub_ai` role/schema `rag`.
   Migrations in migrations/ are manual operator setup, never applied at startup.
   RAG_ENABLED defaults false; RAG_DATABASE_URL is private. GEMINI_API_KEY is reused.
+- Extraction `text/v3` excludes repeated short first/last lines (up to 100
+  characters, on at least two units and at least half of nonempty units) before checking both
+  PARTIAL usefulness thresholds: 200 non-whitespace characters and two useful
+  units. This is a conservative text heuristic, not geometric margin detection;
+  original spans, quality counts and citation offsets remain unchanged.
+- Extraction contracts accept `PARTIAL`, optional `quality`, and up to four
+  warnings including `PARTIAL_EXTRACTION` and `NO_USABLE_TEXT`. NestJS permits
+  indexing `EXTRACTED` or owner-confirmed `PARTIAL` sources; unconfirmed PARTIAL
+  remains blocked. Python chunking accepts these statuses only after NestJS
+  authorization; `OCR_REQUIRED` is rejected.
 - Fixed profile: gemini-embedding-001, 768 dimensions, explicit document/query tasks,
   L2 normalization; deterministic byte-budgeted source chunks and codepoint offsets.
   Never silently change model/dimensions/profile or reset paid-call budgets.
@@ -123,7 +136,7 @@ ROUTER_MODEL=<model hoặc combo trong 9Router>
 - `ROUTER_BASE_URL` phải là `http(s)://host[:port]/v1`, không chứa thông tin đăng nhập, query hay fragment. Trong Docker, `127.0.0.1` là chính container; dùng hostname/mạng nội bộ tới 9Router.
 - `ROUTER_TIMEOUT_MS` (mặc định 30000, 1–120000), `ROUTER_MAX_ATTEMPTS` (mặc định 1, 1–5; chỉ retry `408/429/500/502/503/504` và nằm trong `GENERATION_TIMEOUT_MS`), `ROUTER_MAX_OUTPUT_TOKENS` (mặc định 16384, 1–65536).
 - `ROUTER_RESPONSE_FORMAT=json_schema` (mặc định, strict) hoặc `json_object` (schema nhúng trong prompt) nếu model/upstream không hỗ trợ `json_schema`.
-- Kiểm tra số câu, đáp án, trích dẫn và contract NestJS/frontend không đổi. Quay lại Gemini bằng `LLM_PROVIDER=gemini`; không có fallback tự động.
+- Kiểm tra số câu, đáp án, trích dẫn và contract NestJS/frontend không đổi. Quay lại Gemini bằng `LLM_PROVIDER=gemini`; fallback chỉ bật khi cấu hình `LLM_FALLBACK_PROVIDER=gemini`. Nếu bất kỳ lần thử 9Router nào timeout, lỗi cuối vẫn là timeout dù lần thử sau lỗi kết nối/HTTP khác; không kích hoạt fallback. Lần retry thành công vẫn trả kết quả bình thường.
 - **Embedding/RAG không đi qua 9Router**: `RAG_ENABLED=true` vẫn cần `GEMINI_API_KEY` và `RAG_DATABASE_URL`. Đổi LLM không cần reindex.
 - `/health` không chứng minh 9Router khả dụng; hãy chạy một lần smoke test bằng dữ liệu giả sau khi cấu hình.
 

@@ -100,6 +100,18 @@ def test_router_rag_still_requires_google_embedding_key() -> None:
                  router_api_key="fixture-key", router_model="provider/model",
                  rag_enabled=True, rag_database_url="postgresql://fixture")
 
+@pytest.mark.parametrize("override", [1, 110_000, 124_999])
+def test_grounded_deadline_rejects_insufficient_headroom(override: int) -> None:
+    """Explicit deadlines must leave retrieval/scope checks fifteen seconds."""
+    with pytest.raises(ValueError, match="GROUNDED_GENERATION_TIMEOUT_MS"):
+        Settings(generation_timeout_ms=110_000, grounded_timeout_ms=override)
+
+@pytest.mark.parametrize("override", [125_000, 125_001])
+def test_grounded_deadline_accepts_sufficient_headroom(override: int) -> None:
+    """The exact headroom boundary and larger overrides remain usable."""
+    settings = Settings(generation_timeout_ms=110_000, grounded_timeout_ms=override)
+    assert settings.effective_grounded_timeout_ms == override
+
 def test_fallback_and_grounded_deadline_config(monkeypatch) -> None:
     base = {"gemini_api_key": "gemini-test-key", "llm_provider": "9router", "router_api_key": "router-test-key", "router_model": "m", "router_base_url": "http://127.0.0.1:20128/v1"}
     assert Settings(**base).effective_grounded_timeout_ms == 75_000
