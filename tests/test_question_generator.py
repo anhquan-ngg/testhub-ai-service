@@ -125,6 +125,8 @@ def test_question_configs_reject_answers_for_the_wrong_slot_type(answers) -> Non
     {"question_configs": []},
     {"question_configs": [{"question_type": "SINGLE_CHOICE", "question_format": "KNOWLEDGE", "count": 1}],
      "count": 1},
+    {"question_configs": [{"question_type": "SINGLE_CHOICE", "question_format": "KNOWLEDGE", "count": 1}],
+     "question_format": "KNOWLEDGE"},
     {"question_format": "KNOWLEDGE"},
 ])
 def test_blueprint_rejects_unsupported_or_ambiguous_configs(change) -> None:
@@ -165,3 +167,6 @@ def test_readme_request_and_response_match_slots() -> None:
     command = GenerateRequest.model_validate_json(examples[0])
     response = GenerateResponse.model_validate_json(examples[1])
     check_slots(response.questions, command.slots())
+    assert [(question.question_type, question.question_format) for question in response.questions] == [
+        (slot.question_type, slot.question_format) for slot in command.slots()
+    ]

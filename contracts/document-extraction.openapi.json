@@ -13,6 +13,11 @@
         "summary": "Extract Document",
         "description": "Receive owner-authorized bytes from NestJS and return source-positioned text.",
         "operationId": "extract_document_internal_documents_extract_post",
+        "security": [
+          {
+            "InternalToken": []
+          }
+        ],
         "parameters": [
           {
             "name": "source_type",
@@ -35,22 +40,6 @@
               "type": "boolean",
               "default": false,
               "title": "Include Notes"
-            }
-          },
-          {
-            "name": "x-internal-token",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Internal-Token"
             }
           }
         ],
@@ -268,6 +257,13 @@
           "text"
         ],
         "title": "SourceSpan"
+      }
+    },
+    "securitySchemes": {
+      "InternalToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-internal-token"
       }
     }
   }

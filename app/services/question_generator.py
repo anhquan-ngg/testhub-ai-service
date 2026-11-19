@@ -63,38 +63,46 @@ def parse_grounded_outcome(raw: str, *, slot_count: int, mode: str) -> RawGround
     return parsed
 
 
-def _comparable(text: str) -> tuple[str, list[int]]:
-    """NFD-decompose per character and collapse whitespace, mapping back to source indexes."""
+def _comparable(text: str) -> tuple[str, list[tuple[int, int]]]:
+    """Normalize combining clusters and whitespace, retaining complete source spans."""
     chars: list[str] = []
-    origins: list[int] = []
-    for index, char in enumerate(text):
-        if char.isspace():
-            if chars and chars[-1] != " ":
+    origins: list[tuple[int, int]] = []
+    index = 0
+    while index < len(text):
+        end = index + 1
+        if text[index].isspace():
+            while end < len(text) and text[end].isspace():
+                end += 1
+            if chars:
                 chars.append(" ")
-                origins.append(index)
-            continue
-        for part in unicodedata.normalize("NFD", char):
-            chars.append(part)
-            origins.append(index)
+                origins.append((index, end))
+        else:
+            # Normalize the whole cluster so canonical mark reordering is preserved.
+            while end < len(text) and unicodedata.combining(text[end]):
+                end += 1
+            normalized = unicodedata.normalize("NFD", text[index:end])
+            chars.extend(normalized)
+            origins.extend([(index, end)] * len(normalized))
+        index = end
     return "".join(chars), origins
 
 
 def locate_quote(quote: str, text: str) -> str | None:
     """Return the exact source span matching a quote despite whitespace/Unicode form drift."""
-    if quote.strip() and quote in text:
-        return quote
     needle = _comparable(quote)[0].strip()
+    if not needle:
+        return None
     haystack, origins = _comparable(text)
-    start = haystack.find(needle) if needle else -1
-    if start < 0:
-        return None
-    end = start + len(needle) - 1
-    # Reject matches that start or end inside a decomposed source character (e.g. "a" of "á").
-    if (start > 0 and origins[start - 1] == origins[start]) or (
-        end + 1 < len(origins) and origins[end + 1] == origins[end]
-    ):
-        return None
-    return text[origins[start]:origins[end] + 1]
+    start = haystack.find(needle)
+    while start >= 0:
+        end = start + len(needle) - 1
+        # A partial combining cluster is not evidence, even for an exact substring.
+        if not ((start > 0 and origins[start - 1] == origins[start]) or (
+            end + 1 < len(origins) and origins[end + 1] == origins[end]
+        )):
+            return text[origins[start][0]:origins[end][1]]
+        start = haystack.find(needle, start + 1)
+    return None
 
 
 def checked_citations(raw: list[RawCitation], chunks: dict[UUID, RetrievedChunk], *, slot: int, mode: str) -> list[SourceCitation]:

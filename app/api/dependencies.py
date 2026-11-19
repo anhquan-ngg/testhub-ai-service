@@ -2,7 +2,8 @@
 
 import secrets
 
-from fastapi import Header, HTTPException, Request
+from fastapi import HTTPException, Request, Security
+from fastapi.security import APIKeyHeader
 
 from app.config import Settings
 from app.errors import ServiceUnavailableError
@@ -10,8 +11,10 @@ from app.services.question_generator import QuestionGenerator
 from app.services.rag_errors import RagError
 
 
+internal_token = APIKeyHeader(name="x-internal-token", scheme_name="InternalToken", auto_error=False)
+
 def require_internal_token(
-    request: Request, x_internal_token: str | None = Header(default=None),
+    request: Request, x_internal_token: str | None = Security(internal_token),
 ) -> None:
     """Compare encoded bytes so non-ASCII input cannot cause a TypeError."""
     settings: Settings = request.app.state.settings

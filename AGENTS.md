@@ -4,6 +4,17 @@
 tạo file local với tiêu đề và trạng thái đã xác minh trước khi đọc/cập nhật;
 không thêm file này vào Git. Quy tắc này áp dụng cho mọi yêu cầu đọc file bên dưới.
 
+## Embedding 429 resilience (audit)
+
+- `GoogleEmbeddingProvider` owns a per-process item limiter (`EMBEDDING_MAX_RPM`), a
+  concurrency cap, an LRU cache and in-call dedup, plus bounded retries for
+  429/5xx/transport errors with jitter and `Retry-After`/`RetryInfo`. Daily-quota 429s are
+  `RAG_EMBEDDING_QUOTA_EXHAUSTED` (non-retryable, 5-minute breaker). `retrieve_plan` dedups queries.
+- Keep the retry budget below the 40 s RAG deadline. Never change the model/dims/profile or
+  rotate keys to bypass quota. Tests use MockTransport and a fake clock only
+  (`tests/test_embedding_resilience.py`; mock benchmark in `scripts/benchmark_embedding_mock.py`).
+- Report: `testhub/docs/ai-question-generation-embedding-audit.md`.
+
 ## Grounded evidence refusals
 
 - Use RawGroundedGenerationOutcome only for internal provider output. Empty
@@ -42,7 +53,7 @@ không thêm file này vào Git. Quy tắc này áp dụng cho mọi yêu cầu 
 ## Question configs for generation (2026-10-23)
 
 - GenerateRequest and GroundedGenerateRequest share QuestionBlueprint: either
-  ordered question_configs [{question_type, question_format, count}] (1-10 rows,
+  ordered question_configs [{question_type, question_format, count}] (1-20 rows,
   total <=20, SINGLE_CHOICE|MULTIPLE_CHOICE) or the legacy question_format+count
   (single choice). Both forms together are rejected; use request.slots().
 - Prompts list one slot per question; check_slots validates count and the
@@ -62,7 +73,9 @@ không thêm file này vào Git. Quy tắc này áp dụng cho mọi yêu cầu 
   QuestionGenerator admission/provider/deadline and rechecks full scope afterward.
 - GeminiProvider.generate_grounded uses a separate structured response schema;
   text-generation.v1 stays unchanged. Validate exact count, distinct questions,
-  four options/one answer, known chunk IDs and exact nonblank evidence quotes.
+  four options per question, exactly one correct answer for SINGLE_CHOICE or
+  two or three for MULTIPLE_CHOICE as required by each slot, known chunk IDs
+  and exact nonblank evidence quotes.
 - Citations include original source chunks/positions/hashes. UNASSESSED is explicit:
   quote matching does not establish answer entailment, factual accuracy or full-file
   coverage. Never fabricate citations or fall back to general knowledge.

@@ -233,6 +233,12 @@ def test_quote_drift_maps_to_exact_source_span(context):
 
 @pytest.mark.parametrize("quote,text,expected",[
     ("LIFO","Stack uses LIFO.","LIFO"),
+    ("a\u0300\u0315", "__ a\u0315\u0300 __", "a\u0315\u0300"),
+    ("b a", "b \u00e1 / b\na", "b\na"),
+    ("b a", "b a\u0301 / b\na", "b\na"),
+    ("a", "a\u0301", None),
+    ("\u0301", "a\u0301", None),
+    ("\uac01", "__ \u1100\u1161\u11a8 __", "\u1100\u1161\u11a8"),
     ("Ngăn xếp hoạt động theo nguyên tắc LIFO","Ngăn xếp hoạt động theo\nnguyên tắc  LIFO.","Ngăn xếp hoạt động theo\nnguyên tắc  LIFO"),
     ("Ngăn xếp","__NFD__Ngăn xếp dùng LIFO","__NFD__Ngăn xếp"),
     ("hoat dong","Ngăn xếp hoạt động",None),

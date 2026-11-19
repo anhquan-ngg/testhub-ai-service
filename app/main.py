@@ -39,7 +39,15 @@ def create_app(
                 from app.repositories.vector_repository import VectorRepository
                 from app.services.embedding import GoogleEmbeddingProvider
                 from app.services.retrieval import RagService
-                embedding = GoogleEmbeddingProvider(config.gemini_api_key)
+                embedding = GoogleEmbeddingProvider(
+                    config.gemini_api_key,
+                    max_rpm=config.embedding_max_rpm,
+                    max_concurrency=config.embedding_max_concurrency,
+                    max_attempts=config.embedding_max_attempts,
+                    max_backoff_ms=config.embedding_max_backoff_ms,
+                    retry_budget_ms=config.embedding_retry_budget_ms,
+                    cache_size=config.embedding_cache_size,
+                )
                 if sys.platform == "win32":
                     from app.repositories.windows_pool import SelectorRepository
                     rag_repository = SelectorRepository()
@@ -70,16 +78,24 @@ def create_app(
         try:
             yield
         finally:
-            await document_parser.aclose()
+            cleanup_error: BaseException | None = None
+            resources = [(document_parser.aclose, False)]
             if embedding is not None:
-                await embedding.aclose()
+                resources.append((embedding.aclose, False))
             if rag_repository is not None:
-                try:
-                    await rag_repository.close()
-                except Exception:
-                    logger.warning("rag_pool_close_failed")
+                resources.append((rag_repository.close, True))
             if provider is not None:
-                await provider.aclose()
+                resources.append((provider.aclose, False))
+            for close, best_effort in resources:
+                try:
+                    await close()
+                except BaseException as exc:
+                    if best_effort and isinstance(exc, Exception):
+                        logger.warning("rag_pool_close_failed")
+                    elif cleanup_error is None:
+                        cleanup_error = exc
+            if cleanup_error is not None:
+                raise cleanup_error
 
     app = FastAPI(title="TestHub AI Service", version="0.1.0", lifespan=lifespan)
     register_error_handlers(app)

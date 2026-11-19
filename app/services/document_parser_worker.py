@@ -6,8 +6,10 @@ from importlib.metadata import version
 import io
 import json
 import os
+import struct
 import sys
 import zipfile
+import zlib
 from pathlib import Path
 
 from app.schemas.document import (
@@ -23,25 +25,72 @@ MAX_MARGIN_LINE_CHARS = 100
 
 
 def _content_without_repeated_margins(spans: list[SourceSpan]) -> list[str]:
-    """Exclude short, common boundary lines only for partial-source eligibility."""
+    """Discount common short boundary blocks, but retain repeated interior text."""
     units = [[" ".join(line.split()) for line in span.text.splitlines() if line.strip()]
              for span in spans]
     nonempty = [lines for lines in units if lines]
-    boundaries = Counter(line for lines in nonempty for line in {lines[0], lines[-1]}
-                         if len(line) <= MAX_MARGIN_LINE_CHARS)
-    repeated = {line for line, count in boundaries.items()
+    occurrences = Counter(line for lines in nonempty for line in set(lines)
+                          if len(line) <= MAX_MARGIN_LINE_CHARS)
+    repeated = {line for line, count in occurrences.items()
                 if count >= 2 and count * 2 >= len(nonempty)}
     content: list[str] = []
     for lines in units:
         # Keep source spans untouched so citations retain their original offsets.
-        start = 1 if lines and lines[0] in repeated else 0
-        end = len(lines) - 1 if lines and lines[-1] in repeated else len(lines)
+        start, end = 0, len(lines)
+        while start < end and lines[start] in repeated:
+            start += 1
+        while end > start and lines[end - 1] in repeated:
+            end -= 1
         content.append("\n".join(lines[start:end]))
     return content
 
 
 class DocumentRejected(Exception):
     """Only an allowlisted error code may cross the process boundary."""
+
+
+ZIP_EXPANSION_LIMIT = 100 * 1024 * 1024
+ZIP_BLOCK_BYTES = 64 * 1024
+
+
+def _inflate_entry(data: bytes, entry: zipfile.ZipInfo, remaining: int) -> bytes:
+    name_size, extra_size = struct.unpack_from("<HH", data, entry.header_offset + 26)
+    cursor = entry.header_offset + 30 + name_size + extra_size
+    end = cursor + entry.compress_size
+    if end > len(data):
+        raise DocumentRejected("DOCUMENT_INVALID")
+    content = bytearray()
+
+    def append(block: bytes) -> None:
+        if len(content) + len(block) > remaining:
+            raise DocumentRejected("DOCUMENT_LIMIT_EXCEEDED")
+        content.extend(block)
+
+    if entry.compress_type == zipfile.ZIP_STORED:
+        while cursor < end:
+            boundary = min(end, cursor + ZIP_BLOCK_BYTES)
+            append(data[cursor:boundary])
+            cursor = boundary
+    else:
+        inflater = zlib.decompressobj(-zlib.MAX_WBITS)
+        pending = b""
+        while True:
+            if not pending and cursor < end:
+                boundary = min(end, cursor + ZIP_BLOCK_BYTES)
+                pending = data[cursor:boundary]
+                cursor = boundary
+            block = inflater.decompress(pending, min(ZIP_BLOCK_BYTES, remaining - len(content) + 1))
+            pending = inflater.unconsumed_tail
+            append(block)
+            if inflater.eof:
+                if pending or inflater.unused_data or cursor != end:
+                    raise DocumentRejected("DOCUMENT_INVALID")
+                break
+            if not block and not pending and cursor == end:
+                raise DocumentRejected("DOCUMENT_INVALID")
+    if len(content) != entry.file_size or zlib.crc32(content) != entry.CRC:
+        raise DocumentRejected("DOCUMENT_INVALID")
+    return bytes(content)
 
 
 def checked_pptx(data: bytes) -> io.BytesIO:
@@ -61,20 +110,18 @@ def checked_pptx(data: bytes) -> io.BytesIO:
                     or entry.flag_bits & 1 or entry.compress_type not in (0, 8)):
                     raise DocumentRejected("DOCUMENT_INVALID")
                 names.add(name)
-                remaining = 100 * 1024 * 1024 - total
+                remaining = ZIP_EXPANSION_LIMIT - total
                 if entry.file_size > remaining:
                     raise DocumentRejected("DOCUMENT_LIMIT_EXCEEDED")
-                # A forged central-directory size is not the expansion boundary:
-                # read at most remaining+1, verify actual length, then repack.
-                with source.open(entry) as stream:
-                    content = stream.read(remaining + 1)
+                # Validate local headers and overlaps, but do not let ZipExtFile's
+                # declared-size clamp hide extra output or a truncated deflate stream.
+                with source.open(entry):
+                    content = _inflate_entry(data, entry, remaining)
                 total += len(content)
-                if total > 100 * 1024 * 1024:
-                    raise DocumentRejected("DOCUMENT_LIMIT_EXCEEDED")
                 dest.writestr(name, content)
             if not {"[Content_Types].xml", "ppt/presentation.xml"}.issubset(names):
                 raise DocumentRejected("DOCUMENT_INVALID")
-    except (zipfile.BadZipFile, RuntimeError, OSError, NotImplementedError):
+    except (zipfile.BadZipFile, RuntimeError, OSError, NotImplementedError, struct.error, zlib.error):
         raise DocumentRejected("DOCUMENT_INVALID") from None
     target.seek(0)
     return target
@@ -86,7 +133,7 @@ def extract(path: Path, source_type: str, include_notes: bool) -> ExtractionResu
     if not data or len(data) > MAX_FILE_BYTES:
         raise DocumentRejected("DOCUMENT_LIMIT_EXCEEDED")
     spans: list[SourceSpan] = []
-    ocr_suspected: list[int] = []
+    image_units: set[int] = set()
     chars = 0
 
     def add(kind: str, position: int, text: str) -> None:
@@ -112,12 +159,12 @@ def extract(path: Path, source_type: str, include_notes: bool) -> ExtractionResu
         for number, page in enumerate(reader.pages, 1):
             text = page.extract_text() or ""
             add("PAGE", number, text)
-            # Conservatively flag image-only pages even in a mixed PDF.
-            if not text.strip() and bool(page.images):
-                ocr_suspected.append(number)
+            if page.images:
+                image_units.add(number)
     elif source_type == "PPTX":
         from pptx import Presentation
         from pptx.shapes.picture import Picture
+        from pptx.slide import Slide
         presentation = Presentation(checked_pptx(data))
         count = len(presentation.slides)
         if not 1 <= count <= MAX_UNITS:
@@ -139,11 +186,18 @@ def extract(path: Path, source_type: str, include_notes: bool) -> ExtractionResu
                        (shape.shape_type == 6 and contains_image(shape.shapes))
                        for shape in shapes)
 
+        def background_has_image(slide: Slide) -> bool:
+            for owner in (slide, slide.slide_layout, slide.slide_layout.slide_master):
+                background = owner._element.cSld.bg
+                if background is not None:
+                    return bool(background.xpath(".//a:blip"))
+            return False
+
         for number, slide in enumerate(presentation.slides, 1):
             text = "\n".join(shape_text(slide.shapes))
             add("SLIDE", number, text)
-            if not text.strip() and contains_image(slide.shapes):
-                ocr_suspected.append(number)
+            if contains_image(slide.shapes) or background_has_image(slide):
+                image_units.add(number)
             if include_notes and slide.has_notes_slide:
                 frame = slide.notes_slide.notes_text_frame
                 if frame is not None and frame.text.strip():
@@ -152,13 +206,17 @@ def extract(path: Path, source_type: str, include_notes: bool) -> ExtractionResu
         raise DocumentRejected("DOCUMENT_INVALID")
     base = [span for span in spans if span.kind != "NOTES"]
     text_units = [span.position for span in base if span.text]
-    blank = [span.position for span in base if not span.text and span.position not in ocr_suspected]
     content = _content_without_repeated_margins(base)
+    ocr_suspected = [span.position for span, body in zip(base, content)
+                     if span.position in image_units and not body.strip()]
+    blank = [span.position for span in base if not span.text and span.position not in ocr_suspected]
     useful_chars = sum(len("".join(text.split())) for text in content)
-    useful = sum(bool(text) for text in content) >= MIN_USEFUL_UNITS and useful_chars >= MIN_USEFUL_CHARS
+    required_units = min(MIN_USEFUL_UNITS, max(1, count - 1))
+    useful = sum(bool(text) for text in content) >= required_units and useful_chars >= MIN_USEFUL_CHARS
     if not ocr_suspected:
         # No unit looks scanned. Text-less sources stay blocked, but are not OCR candidates.
-        status = "EXTRACTED" if any(span.text for span in spans) else "OCR_REQUIRED"
+        has_content = any(content) or any(span.text for span in spans if span.kind == "NOTES")
+        status = "EXTRACTED" if has_content else "OCR_REQUIRED"
         warnings = ["NO_USABLE_TEXT"] if status == "OCR_REQUIRED" else []
     elif useful:
         status, warnings = "PARTIAL", ["PARTIAL_EXTRACTION"]

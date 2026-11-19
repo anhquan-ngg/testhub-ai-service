@@ -13,33 +13,15 @@
         "summary": "Generate",
         "description": "Generate evidence-cited questions from fully scoped READY indexes.",
         "operationId": "generate_internal_rag_generate_post",
-        "parameters": [
-          {
-            "name": "x-internal-token",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Internal-Token"
-            }
-          }
-        ],
         "requestBody": {
-          "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/GroundedGenerateRequest"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -142,7 +124,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "InternalToken": []
+          }
+        ]
       }
     },
     "/internal/rag/outline": {
@@ -153,33 +140,15 @@
         "summary": "Outline",
         "description": "Inspect every authorized source unit without a paid planning invocation.",
         "operationId": "outline_internal_rag_outline_post",
-        "parameters": [
-          {
-            "name": "x-internal-token",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Internal-Token"
-            }
-          }
-        ],
         "requestBody": {
-          "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/OutlineRequest"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -282,7 +251,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "InternalToken": []
+          }
+        ]
       }
     },
     "/internal/rag/profile": {
@@ -293,24 +267,6 @@
         "summary": "Profile",
         "description": "Expose the immutable current profile without a paid provider call.",
         "operationId": "profile_internal_rag_profile_get",
-        "parameters": [
-          {
-            "name": "x-internal-token",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Internal-Token"
-            }
-          }
-        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -412,7 +368,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "InternalToken": []
+          }
+        ]
       }
     },
     "/internal/rag/prepare": {
@@ -423,33 +384,15 @@
         "summary": "Prepare",
         "description": "Validate source and create a replayable chunk manifest.",
         "operationId": "prepare_internal_rag_prepare_post",
-        "parameters": [
-          {
-            "name": "x-internal-token",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Internal-Token"
-            }
-          }
-        ],
         "requestBody": {
-          "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/PrepareIndexRequest"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -552,7 +495,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "InternalToken": []
+          }
+        ]
       }
     },
     "/internal/rag/step": {
@@ -563,33 +511,15 @@
         "summary": "Step",
         "description": "Embed at most one bounded batch and checkpoint its vectors.",
         "operationId": "step_internal_rag_step_post",
-        "parameters": [
-          {
-            "name": "x-internal-token",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Internal-Token"
-            }
-          }
-        ],
         "requestBody": {
-          "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/IndexCommand"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -692,7 +622,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "InternalToken": []
+          }
+        ]
       }
     },
     "/internal/rag/retrieve": {
@@ -703,33 +638,15 @@
         "summary": "Retrieve",
         "description": "Retrieve only READY indexes in the authorized owner/profile/id scope.",
         "operationId": "retrieve_internal_rag_retrieve_post",
-        "parameters": [
-          {
-            "name": "x-internal-token",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Internal-Token"
-            }
-          }
-        ],
         "requestBody": {
-          "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/RetrieveRequest"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -832,7 +749,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "InternalToken": []
+          }
+        ]
       }
     },
     "/internal/rag/revoke": {
@@ -843,33 +765,15 @@
         "summary": "Revoke",
         "description": "Revoke technical access, including a tombstone for late prepare requests.",
         "operationId": "revoke_internal_rag_revoke_post",
-        "parameters": [
-          {
-            "name": "x-internal-token",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Internal-Token"
-            }
-          }
-        ],
         "requestBody": {
-          "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/IndexCommand"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "204": {
@@ -965,7 +869,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "InternalToken": []
+          }
+        ]
       }
     }
   },
@@ -2169,6 +2078,13 @@
           "position"
         ],
         "title": "SourceUnit"
+      }
+    },
+    "securitySchemes": {
+      "InternalToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-internal-token"
       }
     }
   }

@@ -47,6 +47,10 @@ class DocumentParser:
         self.timeout_seconds = timeout_seconds
         self._slots = asyncio.Semaphore(max_concurrency)
         self._cleanup_tasks: set[asyncio.Task[None]] = set()
+        self._closing = False
+        self._active = 0
+        self._idle = asyncio.Event()
+        self._idle.set()
 
     async def _cleanup_spawn(
         self, spawn: asyncio.Future[subprocess.Popen[bytes]], folder: tempfile.TemporaryDirectory[str],
@@ -55,25 +59,48 @@ class DocumentParser:
         try:
             while True:
                 try:
-                    process = ThreadedProcess(await asyncio.shield(spawn))
+                    process = await asyncio.shield(spawn)
                     break
                 except asyncio.CancelledError:
-                    # Cleanup ownership must survive cancellation of its supervisor, including
-                    # loop shutdown. `spawn` is a bare executor future (not a task), so only a
-                    # direct cancel can drop the thread's result; nothing here issues one.
                     if spawn.cancelled():
                         raise
-                    continue
-            if process.returncode is None:
+        except BaseException:
+            folder.cleanup()
+            raise
+        await self._cleanup_process(ThreadedProcess(process), folder)
+
+    async def _cleanup_process(
+        self, process: asyncio.subprocess.Process | ThreadedProcess,
+        folder: tempfile.TemporaryDirectory[str],
+    ) -> None:
+        """Retain child ownership through repeated request cancellation during wait."""
+        if process.returncode is None:
+            try:
                 process.kill()
-            await process.wait()
+            except ProcessLookupError:
+                pass
+        # Executor futures survive cancellation of every task at loop shutdown.
+        if isinstance(process, ThreadedProcess):
+            wait = asyncio.get_running_loop().run_in_executor(None, process._process.wait)
+        else:
+            wait = asyncio.create_task(process.wait())
+        try:
+            while True:
+                try:
+                    await asyncio.shield(wait)
+                    break
+                except asyncio.CancelledError:
+                    if wait.cancelled():
+                        wait = asyncio.create_task(process.wait())
         finally:
             folder.cleanup()
 
     async def aclose(self) -> None:
-        """Wait for pending late-spawn cleanup so no child or temp folder outlives shutdown."""
+        """Stop intake and drain active requests before waiting for transferred cleanup."""
+        self._closing = True
+        await self._idle.wait()
         while self._cleanup_tasks:
-            await asyncio.gather(*self._cleanup_tasks, return_exceptions=True)
+            await asyncio.shield(asyncio.gather(*self._cleanup_tasks, return_exceptions=True))
 
     def _cleanup_finished(self, task: asyncio.Task[None]) -> None:
         self._cleanup_tasks.discard(task)
@@ -85,12 +112,20 @@ class DocumentParser:
         self, stream: AsyncIterator[bytes], source_type: str, include_notes: bool,
     ) -> ExtractionResult:
         """Bound request time; retain capacity for any late spawn until cleanup completes."""
-        try:
-            await asyncio.wait_for(self._slots.acquire(), 0.1)
-        except TimeoutError:
-            raise ExtractionError("DOCUMENT_CAPACITY_REACHED", 503) from None
+        if self._closing:
+            raise ExtractionError("DOCUMENT_CAPACITY_REACHED", 503)
+        self._active += 1
+        self._idle.clear()
+        acquired = False
         cleanup: list[asyncio.Task[None]] = []
         try:
+            try:
+                await asyncio.wait_for(self._slots.acquire(), 0.1)
+            except TimeoutError:
+                raise ExtractionError("DOCUMENT_CAPACITY_REACHED", 503) from None
+            acquired = True
+            if self._closing:
+                raise ExtractionError("DOCUMENT_CAPACITY_REACHED", 503)
             return await asyncio.wait_for(
                 self._extract(stream, source_type, include_notes, cleanup), self.timeout_seconds,
             )
@@ -102,8 +137,11 @@ class DocumentParser:
             logger.warning("document_processing_failed error_type=%s", type(exc).__name__)
             raise ExtractionError("DOCUMENT_PROCESS_FAILED", 503) from None
         finally:
-            if not cleanup:
+            if acquired and not cleanup:
                 self._slots.release()
+            self._active -= 1
+            if not self._active:
+                self._idle.set()
 
     async def _extract(
         self, stream: AsyncIterator[bytes], source_type: str, include_notes: bool,
@@ -157,8 +195,11 @@ class DocumentParser:
                 await process.wait()
             finally:
                 if process.returncode is None:
-                    process.kill()
-                    await process.wait()
+                    task = asyncio.create_task(self._cleanup_process(process, folder))
+                    cleanup.append(task)
+                    self._cleanup_tasks.add(task)
+                    task.add_done_callback(self._cleanup_finished)
+                    await asyncio.shield(task)
             if not output.exists() or output.stat().st_size > MAX_RESULT_BYTES:
                 raise ExtractionError("DOCUMENT_PROCESS_FAILED")
             raw = output.read_bytes()

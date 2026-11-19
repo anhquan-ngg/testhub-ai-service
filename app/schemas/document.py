@@ -60,6 +60,13 @@ class ExtractionResult(BaseModel):
             raise ValueError("Text exceeds limit")
         if self.status == "EXTRACTED" and not any(s.text.strip() for s in self.spans):
             raise ValueError("Empty extraction cannot succeed")
-        if self.status == "PARTIAL" and not (self.quality and self.quality.ocr_suspected_units):
-            raise ValueError("Partial extraction requires OCR-suspected units")
+        if self.quality is not None:
+            positions = self.quality.ocr_suspected_units + self.quality.blank_units
+            if (self.quality.total_units != self.unit_count
+                or self.quality.text_units > self.unit_count
+                or len(set(positions)) != len(positions)
+                or any(not 1 <= position <= self.unit_count for position in positions)):
+                raise ValueError("Invalid extraction quality positions")
+            if self.status == "PARTIAL" and not self.quality.ocr_suspected_units:
+                raise ValueError("Partial extraction requires OCR-suspected units")
         return self

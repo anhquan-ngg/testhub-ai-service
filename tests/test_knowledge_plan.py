@@ -35,6 +35,8 @@ def test_outline_reads_all_units_and_unbounded_numbered_hierarchy():
     assert len(result.source_units)==21
     assert len(result.nodes)==21
     assert sum(node.parent_id is None for node in result.nodes)==1
+    assert result.nodes[0].parent_id is None
+    assert all(node.parent_id==parent.id for parent,node in zip(result.nodes,result.nodes[1:]))
     assert result.nodes[-1].source_units[0].position==21
     assert all(node.origin=='HEADING' for node in result.nodes)
 
@@ -47,12 +49,14 @@ def test_missing_outline_proposes_reviewable_page_topics_including_late_pages():
     assert all(node.origin=='INFERRED' for node in result.nodes)
 
 
-def test_same_named_chapter_and_section_roots_are_disambiguated_not_merged():
+def test_same_named_chapter_and_local_section_remain_parent_and_child():
     result=outline(['Part 2: Normalization\nFirst normal form.','3. Normalization\nSecond normal form.'])
-    roots=[node for node in result.nodes if node.parent_id is None]
-    assert len(roots)==2
-    assert len({node.name.casefold() for node in roots})==2
-    assert 'DUPLICATE_TOPIC_NAMES_DISAMBIGUATED' in result.warnings
+    assert len(result.nodes)==2
+    parent,child=result.nodes
+    assert parent.parent_id is None
+    assert child.parent_id==parent.id
+    assert parent.name==child.name=='Normalization'
+    assert 'DUPLICATE_TOPIC_NAMES_DISAMBIGUATED' not in result.warnings
 
 @pytest.mark.parametrize("title", ['Phần cứng máy tính', 'Partition tables', 'Chapter iv: Topic', 'Chapter IVORY', 'Chapter 12abc'])
 def test_non_headings_do_not_match_chapter_prefixes(title):
@@ -260,10 +264,72 @@ def test_planned_mixed_answers_have_explicit_budgets_and_safe_diagnostics(planne
         assert [sum(o['isCorrect'] for o in q['options']) for q in response.json()['questions']]==[1,2]
 
 
-def test_cannot_borrow_another_cells_evidence(planned):
-    client,provider,_,_,body,headers=planned;provider.borrow=True
+@pytest.mark.parametrize('answer_counts', [(1,1,2),(1,1,3),(2,1,2),(1,1,1)])
+def test_expanded_plan_slots_keep_order_types_and_answer_rules(planned,monkeypatch,answer_counts):
+    client,provider,_,_,body,headers=planned
+    configs=[{'question_type':'SINGLE_CHOICE','question_format':'KNOWLEDGE','count':2},
+             {'question_type':'MULTIPLE_CHOICE','question_format':'APPLYING','count':1}]
+    body['question_configs']=configs
+    for item,config in zip(body['plan_items'],configs):
+        item.update(config)
+    original=provider.generate_grounded
+    async def generate(prompt):
+        value=json.loads(await original(prompt))
+        for question,correct in zip(value['questions'],answer_counts):
+            for index,option in enumerate(question['options']):
+                option['isCorrect']=index<correct
+        return json.dumps(value)
+    monkeypatch.setattr(provider,'generate_grounded',generate)
+    response=client.post('/internal/rag/generate',headers=headers,json=body)
+    assert provider.calls==1
+    if answer_counts not in [(1,1,2),(1,1,3)]:
+        assert response.status_code==502
+        assert response.json()['detail']=={'code':'RAG_OUTPUT_INVALID','retryable':False}
+        return
+    assert response.status_code==200,response.text
+    questions=response.json()['questions']
+    assert [q['plan_item_id'] for q in questions]==['cell-0','cell-0','cell-1']
+    assert [q['citations'][0]['chunk']['position'] for q in questions]==[1,1,2]
+    assert [(q['question_type'],q['question_format']) for q in questions]==[
+        ('SINGLE_CHOICE','KNOWLEDGE'),('SINGLE_CHOICE','KNOWLEDGE'),('MULTIPLE_CHOICE','APPLYING')]
+    assert [sum(o['isCorrect'] for o in q['options']) for q in questions]==list(answer_counts)
+
+
+def test_planned_questions_mixed_with_refusals_are_invalid(planned,monkeypatch):
+    client,provider,_,_,body,headers=planned
+    original=provider.generate_grounded
+    async def partial(prompt):
+        value=json.loads(await original(prompt))
+        value['questions']=value['questions'][:1]
+        value['unsupported_slots']=[{'slot':2,'reason':'INSUFFICIENT_EVIDENCE'}]
+        return json.dumps(value)
+    monkeypatch.setattr(provider,'generate_grounded',partial)
     response=client.post('/internal/rag/generate',headers=headers,json=body)
     assert response.status_code==502
+    assert response.json()['detail']=={'code':'RAG_OUTPUT_INVALID','retryable':False}
+    assert provider.calls==1
+
+
+def test_multi_index_plan_is_rejected_before_provider_call(planned):
+    client,provider,_,_,body,headers=planned
+    body['index_ids'].append(str(uuid4()))
+    response=client.post('/internal/rag/generate',headers=headers,json=body)
+    assert response.status_code==422
+    assert provider.calls==0
+
+
+@pytest.mark.parametrize('source,target',[(0,1),(1,0)])
+def test_cannot_borrow_another_cells_evidence(planned,monkeypatch,source,target):
+    client,provider,_,_,body,headers=planned
+    original=provider.generate_grounded
+    async def borrow(prompt):
+        value=json.loads(await original(prompt))
+        value['questions'][target]['citations']=value['questions'][source]['citations']
+        return json.dumps(value)
+    monkeypatch.setattr(provider,'generate_grounded',borrow)
+    response=client.post('/internal/rag/generate',headers=headers,json=body)
+    assert response.status_code==502
+    assert response.json()['detail']=={'code':'RAG_OUTPUT_INVALID','retryable':False}
     assert provider.calls==1
 
 
@@ -271,6 +337,7 @@ def test_cannot_borrow_another_cells_evidence(planned):
     ('json', 'schema'),
     ('schema', 'schema'),
     ('extra', 'schema'),
+    ('metadata', 'schema'),
     ('duplicate_invalid_quote', 'quote_mismatch'),
     ('unknown', 'unknown_chunk'),
     ('quote', 'quote_mismatch'),
@@ -287,6 +354,8 @@ def test_planned_invalid_output_logs_reason_without_source_or_provider_data(plan
             question['question_text']={'private-provider-output':'not a string'}
         elif failure=='extra':
             result['private-provider-output']='not an allowed field'
+        elif failure=='metadata':
+            question['plan_item_id']='private-provider-output'
         elif failure=='duplicate_invalid_quote':
             question['citations'].append({**question['citations'][0], 'quote':'private-provider-output: unsupported quote'})
         elif failure=='unknown':

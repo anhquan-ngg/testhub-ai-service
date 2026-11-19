@@ -55,27 +55,32 @@ def content_map(index_id: UUID, title: str, chunks: list[dict]) -> OutlineRespon
             raise RagError("RAG_SOURCE_CHANGED", 409)
         by_unit[(chunk["kind"], chunk["position"])].append(chunk)
     texts: dict[tuple[str, int], str] = {}
+    total_length = 0
     for unit, parts in by_unit.items():
         result: list[str] = []
         for part in sorted(parts, key=lambda value: value["start_offset"]):
             start, end, text = part["start_offset"], part["end_offset"], part["text"]
             if end - start != len(text):
                 raise RagError("RAG_SOURCE_CHANGED", 409)
-            if start > len(result):
-                result.extend(" " * (start - len(result)))
-            overlap = min(len(result) - start, len(text))
+            gap = max(0, start - len(result))
+            overlap = min(max(0, len(result) - start), len(text))
+            growth = gap + len(text) - overlap
+            if total_length + growth > 1_000_000:
+                raise RagError("RAG_OUTLINE_LIMIT", 422)
             if "".join(result[start:start + overlap]) != text[:overlap]:
                 raise RagError("RAG_SOURCE_CHANGED", 409)
+            if gap:
+                result.extend(" " * gap)
             result.extend(text[overlap:])
+            total_length += growth
         texts[unit] = "".join(result)
-    if sum(map(len, texts.values())) > 1_000_000:
-        raise RagError("RAG_OUTLINE_LIMIT", 422)
     units = sorted(texts, key=lambda unit: (unit[1], unit[0] == "NOTES", unit[0]))
     # Repeated page furniture is weak evidence for a knowledge topic.
     line_frequency = Counter(line.casefold().strip() for text in texts.values()
                              for line in set(text.splitlines()) if line.strip())
     records: dict[str, dict] = {}
-    code_to_id: dict[str, str] = {}
+    code_to_id: dict[tuple[str | None, str], str] = {}
+    current_part: str | None = None
     active: list[str] = []
     headings = 0
     
@@ -111,14 +116,16 @@ def content_map(index_id: UUID, title: str, chunks: list[dict]) -> OutlineRespon
                     following = lines[line_index + 1] if line_index + 1 < len(lines) else ""
                     name = following if 2 <= len(following) <= 190 and not CHAPTER.match(following) and not SECTION.match(following) else line
                 parts = code.split(".")
-                parent = None
+                scope = None if chapter else current_part
+                parent = None if chapter else current_part
                 if not chapter:
                     for length in range(len(parts) - 1, 0, -1):
-                        parent = code_to_id.get(".".join(parts[:length]))
-                        if parent:
+                        candidate = code_to_id.get((scope, ".".join(parts[:length])))
+                        if candidate:
+                            parent = candidate
                             break
                 normalized = topic_name(name)
-                previous = code_to_id.get(code)
+                previous = code_to_id.get((scope, code))
                 # A numbered continuation may shorten the first title (e.g.
                 # "Abstraction in OOP" -> "Abstraction (3)"). Keep that first
                 # title only when both the section and parent match.
@@ -129,11 +136,15 @@ def content_map(index_id: UUID, title: str, chunks: list[dict]) -> OutlineRespon
                         normalized = record["name"]
                 node = add(normalized, parent, unit, "HEADING", line,
                            "heading:" + (parent or "root") + ":" + code + ":" + normalized.casefold())
-                code_to_id[code] = node
-                # Iterative ancestor walk: no configured hierarchy-depth limit.
+                code_to_id[(scope, code)] = node
+                if chapter:
+                    current_part = node
+                    code_to_id[(current_part, code)] = node
+                # Mark every heading's ancestors, even if another heading follows.
                 active, cursor = [], node
                 while cursor:
                     active.append(cursor)
+                    records[cursor]["source_units"].add(unit)
                     cursor = records[cursor]["parent_id"]
         if not found and not active:
             candidates = [line for line in lines if len(line) >= 4 and any(char.isalpha() for char in line)]

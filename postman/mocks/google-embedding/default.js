@@ -1,11 +1,12 @@
 // Derived from the official Google batchEmbedContents contract; synthetic data only.
 const http = require('node:http');
 http.createServer(async (req, res) => {
-  if (req.method !== 'POST' || !(req.url === '/models/gemini-embedding-001:batchEmbedContents' || /^\/models\/[^/]+:generateContent$/.test(req.url))) {res.writeHead(501);res.end();return;}
+  const path = req.url.replace(/^\/v1beta(?=\/)/, '');
+  if (req.method !== 'POST' || !(path === '/models/gemini-embedding-001:batchEmbedContents' || /^\/models\/[^/]+:generateContent$/.test(path))) {res.writeHead(501);res.end();return;}
   const bytes=[];for await(const chunk of req)bytes.push(chunk);
   const input=JSON.parse(Buffer.concat(bytes).toString('utf8'));
 
-  if(req.url.endsWith(':generateContent')){
+  if(path.endsWith(':generateContent')){
     const prompt=input.contents[0].parts[0].text;
     const planned=prompt.includes('Slots:\n');
     const data=JSON.parse(prompt.split(planned?'Slots:\n':'Reference JSON follows:\n')[1]);

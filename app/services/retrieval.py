@@ -15,7 +15,7 @@ from uuid import uuid4
 from app.schemas.rag import (EvidenceDiagnostics, EvidenceIssue, IndexCommand, IndexProgress, MAX_CONTEXT_BYTES, PrepareIndexRequest,
     RetrievedChunk, RetrieveRequest, RetrieveResponse, current_profile)
 from app.services.chunking import chunk_document
-from app.services.embedding import EmbeddingProvider
+from app.services.embedding import EmbeddingProvider, EmbeddingUsage, GoogleEmbeddingProvider
 from app.services.rag_errors import RagError
 
 logger = logging.getLogger(__name__)
@@ -67,12 +67,20 @@ class RagService:
         row, chunks = await self.repository.claim(request, token)
         if row["status"] == "READY":
             return self.progress(row)
+        usage = EmbeddingUsage(upstream_started=bool(chunks))
         try:
-            vectors = await self.embedding.embed([c["text"] for c in chunks], "RETRIEVAL_DOCUMENT") if chunks else []
-            return self.progress(await self.repository.save(request, token, [(c["id"], v) for c,v in zip(chunks,vectors, strict=True)]))
+            if isinstance(self.embedding, GoogleEmbeddingProvider):
+                vectors = await self.embedding.embed([c["text"] for c in chunks], "RETRIEVAL_DOCUMENT", usage=usage) if chunks else []
+            else:
+                # Uninstrumented adapters provide no evidence that an invocation was unsent.
+                vectors = await self.embedding.embed([c["text"] for c in chunks], "RETRIEVAL_DOCUMENT") if chunks else []
+            return self.progress(await self.repository.save(request, token,
+                [(c["id"], v) for c,v in zip(chunks,vectors, strict=True)],
+                **({"refund_attempt": True} if not usage.upstream_started else {})))
         finally:
             try:
-                await asyncio.wait_for(self.repository.release(request.index_id, token), 3)
+                await asyncio.wait_for(self.repository.release(request.index_id, token,
+                    **({"refund_attempt": True} if not usage.upstream_started else {})), 3)
             except Exception:
                 logger.warning("rag_lease_release_deferred")
 
@@ -123,9 +131,14 @@ class RagService:
                 while len(query.encode()) > 1800:
                     query = query[:-1]
                 queries.append(query)
-            vectors = []
-            for offset in range(0, len(queries), BATCH_SIZE):
-                vectors.extend(await self.embedding.embed(queries[offset:offset + BATCH_SIZE], "RETRIEVAL_QUERY"))
+            # Identical objectives share one embedding; order is preserved for the strict zip below.
+            unique = list(dict.fromkeys(queries))
+            unique_vectors = []
+            for offset in range(0, len(unique), BATCH_SIZE):
+                unique_vectors.extend(await self.embedding.embed(unique[offset:offset + BATCH_SIZE], "RETRIEVAL_QUERY"))
+            by_query = dict(zip(unique, unique_vectors, strict=True))
+            vectors = [by_query[query] for query in queries]
+            logger.info("generation_query_embedding plan_items=%s unique_queries=%s", len(queries), len(unique))
             contexts, used, first_slot = {}, 0, 1
             for item, vector in zip(request.plan_items, vectors, strict=True):
                 candidates = await self.repository.search(request.owner_id, request.profile_id, request.index_ids, vector,

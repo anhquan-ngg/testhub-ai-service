@@ -75,7 +75,7 @@ def test_real_sdk_tasks_dimensions_normalization_and_client_reuse(monkeypatch):
         return httpx.Response(200,json={"embeddings":[{"values":[2.]*768} for _ in range(count)]})
     install(monkeypatch,handler)
     async def run():
-        provider=GoogleEmbeddingProvider("fixture-key")
+        provider=GoogleEmbeddingProvider("fixture-key", max_attempts=1)
         try:
             for task in ("RETRIEVAL_DOCUMENT","RETRIEVAL_QUERY"):
                 vectors=await provider.embed(["LIFO","FIFO"],task)
@@ -97,7 +97,7 @@ def test_embedding_failure_no_nested_retries(monkeypatch,caplog,status,retryable
         return httpx.Response(status,json={"error":{"code":status,"message":"PRIVATE-SOURCE"}})
     install(monkeypatch,handler)
     async def run():
-        provider=GoogleEmbeddingProvider("fixture-key")
+        provider=GoogleEmbeddingProvider("fixture-key", max_attempts=1)
         try:
             with pytest.raises(RagError) as error:await provider.embed(["source"],"RETRIEVAL_DOCUMENT")
             assert error.value.retryable is retryable
@@ -110,7 +110,7 @@ def test_timeout_and_cancellation_release_slots(monkeypatch):
     def handler(req):raise httpx.ReadTimeout("PRIVATE",request=req)
     install(monkeypatch,handler)
     async def run():
-        provider=GoogleEmbeddingProvider("fixture-key")
+        provider=GoogleEmbeddingProvider("fixture-key", max_attempts=1)
         try:
             with pytest.raises(RagError) as error:await provider.embed(["source"],"RETRIEVAL_QUERY")
             assert error.value.status==504
@@ -237,4 +237,50 @@ def test_sql_source_unit_filter_includes_index_identity():
         sql, params = db.execute.call_args.args
         assert "u.index_id=c.index_id" in sql and "u(index_id uuid,kind text,position integer)" in sql
         assert json.loads(params[4]) == units and json.loads(params[5]) == units
+    asyncio.run(run())
+
+@pytest.mark.parametrize("refund", [False, True])
+def test_lease_refund_sql_is_single_decrement_and_token_fenced(refund):
+    from unittest.mock import MagicMock
+    from app.repositories.vector_repository import VectorRepository
+    async def run():
+        req, token = command(), uuid4()
+        repo = object.__new__(VectorRepository)
+        db = AsyncMock()
+        connection = MagicMock()
+        connection.__aenter__.return_value = db
+        repo.pool = MagicMock()
+        repo.pool.connection.return_value = connection
+        repo._scoped = AsyncMock(return_value={"attempt_count": 3})
+        cursor = AsyncMock()
+        db.execute.return_value = cursor
+        cursor.fetchone.side_effect = [{"lease": 1}, {"n": 1}]
+        writer = AsyncMock()
+        writer_context = MagicMock()
+        writer_context.__aenter__.return_value = writer
+        db.cursor = MagicMock(return_value=writer_context)
+        await repo.save(req, token, [], refund_attempt=refund)
+        save_query, save_args = db.execute.await_args.args
+        normalized = " ".join(save_query.split())
+        assert "attempt_count=attempt_count-%s" in normalized
+        assert "WHERE id=%s AND lease_token=%s" in normalized
+        assert save_args == (1, 1, int(refund), req.index_id, token)
+        assert "lease_expires_at>clock_timestamp()" in db.execute.await_args_list[0].args[0]
+        # All finalizers, including repeated/stale ones, require the exact live token.
+        await repo.release(req.index_id, token, refund_attempt=refund)
+        await repo.release(req.index_id, uuid4(), refund_attempt=refund)
+        for call in db.execute.await_args_list[-2:]:
+            query, args = call.args
+            assert "attempt_count=attempt_count-%s" in query
+            assert "WHERE id=%s AND lease_token=%s" in query
+            assert "lease_token=NULL" in query
+            assert args[0] == int(refund) and args[1] == req.index_id
+        assert db.execute.await_args_list[-2].args[1][2] == token
+        assert db.execute.await_args_list[-1].args[1][2] != token
+        # A lost/expired lease cannot save or refund, even with the refund flag.
+        db.execute.reset_mock()
+        cursor.fetchone.side_effect = [None]
+        with pytest.raises(RagError, match="RAG_LEASE_LOST"):
+            await repo.save(req, token, [], refund_attempt=True)
+        assert db.execute.await_count == 1
     asyncio.run(run())

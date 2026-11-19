@@ -1,7 +1,15 @@
 -- DBA-only setup, run explicitly against the chosen LOCAL database.
 -- Never run automatically on service startup. Set the login password separately
 -- (psql: \password testhub_ai); do not put real credentials in this file.
+\set ON_ERROR_STOP on
+BEGIN;
 CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
+DO $$ BEGIN
+  IF EXISTS (SELECT FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace
+      WHERE e.extname='vector' AND n.nspname<>'public') THEN
+    RAISE EXCEPTION 'The vector extension must already be installed in schema public; review its schema before bootstrap';
+  END IF;
+END $$;
 DO $$ BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'testhub_ai') THEN
     CREATE ROLE testhub_ai LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
@@ -22,5 +30,6 @@ CREATE SCHEMA IF NOT EXISTS rag AUTHORIZATION testhub_ai;
 REVOKE ALL ON SCHEMA rag FROM PUBLIC;
 GRANT USAGE, CREATE ON SCHEMA rag TO testhub_ai;
 GRANT USAGE ON SCHEMA public TO testhub_ai;
+COMMIT;
 -- This grants NO permissions on business tables. Audit existing PUBLIC grants
 -- on your database separately. Existing PostgreSQL images may lack pgvector.

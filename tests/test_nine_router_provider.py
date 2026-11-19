@@ -15,6 +15,12 @@ from app.providers.factory import create_provider
 from app.providers.gemini import GeminiProvider
 from app.providers.nine_router import NineRouterProvider
 
+@pytest.fixture
+def anyio_backend():
+    """Exercise the adapter on the application's supported asyncio backend."""
+    return "asyncio"
+
+
 API_KEY = "router-test-secret-key"
 SETTINGS = Settings(
     llm_provider="9router",
@@ -99,7 +105,8 @@ def test_strict_schema_closes_every_object() -> None:
         if isinstance(node, dict):
             if node.get("type") == "object":
                 assert node["additionalProperties"] is False
-                assert node["required"] == list(node["properties"])
+                assert set(node["required"]) == set(node["properties"])
+                assert len(node["required"]) == len(node["properties"])
             for child in node.values():
                 walk(child)
         elif isinstance(node, list):
@@ -226,8 +233,8 @@ async def test_timeout_survives_later_failure_without_fallback(
             await getattr(FallbackProvider(primary, fallback), operation)("prompt")
         assert calls == 2
         sleep.assert_awaited_once_with(0.5)
-        fallback.generate.assert_not_awaited()
-        fallback.generate_grounded.assert_not_awaited()
+        fallback.generate.assert_not_called()
+        fallback.generate_grounded.assert_not_called()
     finally:
         await primary.aclose()
 
