@@ -1,5 +1,6 @@
 """Disposable parser process. No network, DB, provider calls or source logging."""
 
+from collections import Counter
 import hashlib
 from importlib.metadata import version
 import io
@@ -18,6 +19,26 @@ from app.schemas.document import (
 # Header/footer-only text is not evidence of a usable source.
 MIN_USEFUL_CHARS = 200
 MIN_USEFUL_UNITS = 2
+MAX_MARGIN_LINE_CHARS = 100
+
+
+def _content_without_repeated_margins(spans: list[SourceSpan]) -> list[str]:
+    """Exclude short, common boundary lines only for partial-source eligibility."""
+    units = [[" ".join(line.split()) for line in span.text.splitlines() if line.strip()]
+             for span in spans]
+    nonempty = [lines for lines in units if lines]
+    boundaries = Counter(line for lines in nonempty for line in {lines[0], lines[-1]}
+                         if len(line) <= MAX_MARGIN_LINE_CHARS)
+    repeated = {line for line, count in boundaries.items()
+                if count >= 2 and count * 2 >= len(nonempty)}
+    content: list[str] = []
+    for lines in units:
+        # Keep source spans untouched so citations retain their original offsets.
+        start = 1 if lines and lines[0] in repeated else 0
+        end = len(lines) - 1 if lines and lines[-1] in repeated else len(lines)
+        content.append("\n".join(lines[start:end]))
+    return content
+
 
 class DocumentRejected(Exception):
     """Only an allowlisted error code may cross the process boundary."""
@@ -132,8 +153,9 @@ def extract(path: Path, source_type: str, include_notes: bool) -> ExtractionResu
     base = [span for span in spans if span.kind != "NOTES"]
     text_units = [span.position for span in base if span.text]
     blank = [span.position for span in base if not span.text and span.position not in ocr_suspected]
-    useful_chars = sum(len("".join(span.text.split())) for span in base)
-    useful = len(text_units) >= MIN_USEFUL_UNITS and useful_chars >= MIN_USEFUL_CHARS
+    content = _content_without_repeated_margins(base)
+    useful_chars = sum(len("".join(text.split())) for text in content)
+    useful = sum(bool(text) for text in content) >= MIN_USEFUL_UNITS and useful_chars >= MIN_USEFUL_CHARS
     if not ocr_suspected:
         # No unit looks scanned. Text-less sources stay blocked, but are not OCR candidates.
         status = "EXTRACTED" if any(span.text for span in spans) else "OCR_REQUIRED"
@@ -146,7 +168,7 @@ def extract(path: Path, source_type: str, include_notes: bool) -> ExtractionResu
         warnings = ["EMPTY_UNITS"] + warnings
     return ExtractionResult(
         source_type=source_type, source_sha256=hashlib.sha256(data).hexdigest(),
-        parser_version=f"{source_type.lower()}/{version('pypdf' if source_type == 'PDF' else 'python-pptx')};text/v2",
+        parser_version=f"{source_type.lower()}/{version('pypdf' if source_type == 'PDF' else 'python-pptx')};text/v3",
         include_notes=include_notes, unit_count=count, spans=spans, status=status, warnings=warnings,
         quality=ExtractionQuality(total_units=count, text_units=len(text_units),
                                   ocr_suspected_units=ocr_suspected, blank_units=blank),

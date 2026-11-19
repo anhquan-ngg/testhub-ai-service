@@ -157,13 +157,53 @@ def test_cover_only_gap_with_substantial_text_is_partial(client):
     assert result["spans"][0] == {"kind": "PAGE", "position": 1, "text": ""}
     assert result["quality"] == {"total_units": 4, "text_units": 3, "ocr_suspected_units": [1], "blank_units": []}
     assert result["warnings"] == ["EMPTY_UNITS", "PARTIAL_EXTRACTION"]
-    assert result["parser_version"].endswith(";text/v2")
+    assert result["parser_version"].endswith(";text/v3")
 
 def test_header_footer_sized_text_is_not_enough_for_partial(client):
     result = extract(client, mixed_pdf(["Page header", "Page footer"])).json()
     assert result["status"] == "OCR_REQUIRED"
     assert result["warnings"] == ["EMPTY_UNITS", "OCR_REQUIRED"]
     assert result["quality"]["ocr_suspected_units"] == [1]
+
+@pytest.mark.parametrize("text_pages", [
+    ["Page header"] * 20,
+    ["Page header"] * 20 + ["Unique useful body content. " * 10],
+])
+def test_repeated_margins_do_not_make_mixed_pdf_usable(
+    client: TestClient, text_pages: list[str],
+) -> None:
+    """Repeated margins must satisfy neither useful characters nor useful units."""
+    from uuid import uuid4
+    from app.schemas.document import ExtractionResult
+    from app.services.chunking import chunk_document
+    from app.services.rag_errors import RagError
+
+    response = extract(client, mixed_pdf(text_pages))
+    assert response.status_code == 200
+    result = ExtractionResult.model_validate(response.json())
+    assert result.status == "OCR_REQUIRED"
+    assert result.spans[1].text == "Page header"
+    with pytest.raises(RagError, match="RAG_OCR_REQUIRED"):
+        chunk_document(uuid4(), result)
+
+def test_repeated_margins_preserve_useful_page_bodies(client: TestClient) -> None:
+    """Ignore short repeated boundaries without discarding real text or offsets."""
+    from uuid import uuid4
+    from app.schemas.document import ExtractionResult
+    from app.services.chunking import chunk_document
+
+    pages = ["Page header\n" + f"Topic {i} explains normalization. " * 10 + "\nPage footer"
+             for i in range(3)]
+    response = extract(client, mixed_pdf(pages))
+    assert response.status_code == 200
+    result = ExtractionResult.model_validate(response.json())
+    assert result.status == "PARTIAL"
+    chunks = chunk_document(uuid4(), result)
+    assert {chunk.position for chunk in chunks} == {2, 3, 4}
+    for chunk in chunks:
+        original = result.spans[chunk.position - 1].text
+        assert original[chunk.start_offset:chunk.end_offset] == chunk.text
+        assert "Page header" in chunk.text and "Page footer" in chunk.text
 
 def test_fully_texted_pdf_has_clean_quality(client):
     result = extract(client, pdf_bytes()).json()

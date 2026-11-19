@@ -86,6 +86,7 @@ class NineRouterProvider:
             "max_tokens": self._settings.router_max_output_tokens,
             "response_format": response_format,
         }
+        timeout_error: ProviderTimeoutError | None = None
         for attempt in range(self._settings.router_max_attempts):
             try:
                 return await self._request(payload)
@@ -97,12 +98,16 @@ class NineRouterProvider:
                 error = (ProviderTimeoutError("9Router request timed out") if isinstance(exc, (TimeoutError, httpx.TimeoutException))
                                          else ProviderUnavailableError("9Router request failed"))
             except ProviderError:
+                if timeout_error is not None:
+                    raise timeout_error from None
                 raise
             except Exception as exc:
                 logger.warning("nine_router_failure stage=generate exception_type=%s", type(exc).__name__)
-                raise ProviderError("9Router request failed") from None
+                raise (timeout_error or ProviderError("9Router request failed")) from None
+            if isinstance(error, ProviderTimeoutError):
+                timeout_error = error
             if attempt + 1 == self._settings.router_max_attempts:
-                raise error from None
+                raise (timeout_error or error) from None
             # Retries and backoff remain inside QuestionGenerator's shared deadline.
             await asyncio.sleep(min(0.5 * 2**attempt, 2))
         raise ProviderError("9Router request failed")

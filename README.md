@@ -1,346 +1,278 @@
-# testhub-ai-service
+# TestHub AI Service
 
-## Source-wide knowledge plans (2026-10-25)
+## Overview
 
-- POST /internal/rag/outline reconstructs all authorized chunks, recognizes numbered chapter/section headings and proposes inferred page topics when no outline exists. These are editable heuristics, not validated semantic classifications.
-- Repeated slide titles ending in numeric counters such as `Constructor method(2)`
-  or `Constructor method (3)` become one topic with the union of their source pages.
-  Numbered sections stay scoped to their section code/parent; named qualifiers
-  such as `(Java)` remain distinct. Existing saved plans are not rewritten: restart
-  the AI service and create a new plan to use the revised outline.
-- GroundedGenerateRequest.plan_items binds each cognitive cell to an objective and source units. SQL filters allowed units BEFORE nearest-neighbor LIMIT; missing cell evidence fails rather than substituting another topic.
-- One provider invocation receives isolated ordered slot contexts. Validate each quote against that slot only and assign plan_item_id server-side. Recheck authorization after I/O.
-- Apply new manual migration migrations/002_optional_document_chapter.sql before topic-owned document indexing; old migrations remain unchanged.
-- Config rows now max20 / total questions max20. Keep exported RAG OpenAPI in sync. CONTINUITY.md is local and ignored/untracked.
+Internal FastAPI service for TestHub question generation, PDF/PPTX text extraction, and retrieval-augmented generation (RAG). The NestJS backend calls this service; the web frontend must not call it directly.
 
+This is a standalone Python repository, not a Python worker inside the NestJS application. NestJS owns authentication, authorization, uploads, queues, batches, draft review, and question-bank writes. This service owns parsing, technical RAG storage, embeddings, retrieval, prompts, and structured-output validation.
 
-## Grounded document question generation (2026-10-23)
+## Key Features
 
-- POST /internal/rag/generate implements rag-generation.v1, authenticated with the
-  existing token. GroundedGeneration retrieves authorized READY chunks, shares
-  QuestionGenerator admission/provider/deadline and rechecks full scope afterward.
-- GeminiProvider.generate_grounded uses a separate structured response schema;
-  text-generation.v1 stays unchanged. Validate exact count, distinct questions,
-  four options/one answer, known chunk IDs and exact nonblank evidence quotes.
-- Citations include original source chunks/positions/hashes. UNASSESSED is explicit:
-  quote matching does not establish answer entailment, factual accuracy or full-file
-  coverage. Never fabricate citations or fall back to general knowledge.
-- Total grounded deadline 75s; NestJS uses 85s. Generation shares the existing
-  semaphore/client and bounded SDK retries. No Python bank/business writes.
-- Export contracts/rag-indexing.openapi.json after route/schema changes. Tests use
-  synthetic providers or real SDK HTTP against local Postman fixtures, never real
-  keys/documents. Backend/Next.js now accept attached PDFs/PPTX and retain evidence
-  through review/edit/commit. See https://github.com/anhquan-ngg/testhub-v2-backend/blob/master/docs/rag-indexing.md section 4.
+- Generate Vietnamese `SINGLE_CHOICE` and `MULTIPLE_CHOICE` questions with ordered cognitive-level slots and four distinct options.
+- Select Gemini or an OpenAI-compatible 9Router generation adapter; optionally fall back from 9Router to Gemini for eligible availability failures only.
+- Extract PDF pages and PPTX slides/optional notes with original positions, hashes, text offsets, and per-unit diagnostics. No OCR engine is included.
+- Index and retrieve owner-scoped document chunks using Google embeddings and PostgreSQL/pgvector.
+- Propose source-wide knowledge outlines for backend-owned plans and generate against frozen plan slots, source units, and objectives.
+- Validate citations, counts, answers, and complete-batch output. Valid evidence refusals return a distinct domain error rather than partial questions.
 
-## Current RAG implementation (2026-10-21)
+## Technology Stack
 
-- Chunking, Google embedding and scoped retrieval are implemented. This supersedes
-  the earlier extraction-only snapshots below. Grounded generation is implemented; OCR, hybrid/reranking and additional
-  providers remain future work.
-- `api/rag.py`, `schemas/rag.py`, `services/chunking.py`, `embedding.py`,
-  `retrieval.py`, `repositories/vector_repository.py` own the internal contract.
-  NestJS authorizes business scope and orchestrates checkpointed BullMQ work.
-- Use the same PostgreSQL DB with dedicated `testhub_ai` role/schema `rag`.
-  Migrations in migrations/ are manual operator setup, never applied at startup.
-  RAG_ENABLED defaults false; RAG_DATABASE_URL is private. GEMINI_API_KEY is reused.
-- Fixed profile: gemini-embedding-001, 768 dimensions, explicit document/query tasks,
-  L2 normalization; deterministic byte-budgeted source chunks and codepoint offsets.
-  Never silently change model/dimensions/profile or reset paid-call budgets.
-- Only READY owner/profile/index scopes are searchable. Keep full-scope pre/post
-  checks, SQL filters, tombstones and fenced leases. Python never writes bank data.
-- On Windows, parser subprocesses use asyncio on Proactor loops and fall back to
-  Popen with waiting in a thread on selector loops; the psycopg
-  pool runs on an owned selector-loop thread. Readiness checks DB schema, not Google.
-- Setup/API/limits: [backend RAG guide](https://github.com/anhquan-ngg/testhub-v2-backend/blob/master/docs/rag-indexing.md).
-  Contract: contracts/rag-indexing.openapi.json; regenerate via
-  `python scripts/export_rag_contract.py`. Run pytest and opt-in SDK HTTP simulation;
-  real pgvector tests require isolated RAG_TEST_DATABASE_URL, never RAG_DATABASE_URL.
+Versions are declared dependency ranges unless identified as a runtime target; this repository has no dependency lockfile.
 
-FastAPI nội bộ sinh câu hỏi từ văn bản, trích xuất PDF/PPTX, chia chunks, tạo
-embedding Google và truy xuất ngữ cảnh. Python chỉ ghi schema `rag`; NestJS sở hữu
-dữ liệu nghiệp vụ và ngân hàng câu hỏi. Python không giữ credential S3.
+| Area | Technology |
+| --- | --- |
+| Runtime | Python 3.12 target; Docker uses `python:3.12-slim` |
+| HTTP/API | FastAPI `>=0.115,<1`, Uvicorn `>=0.30,<1`, Pydantic `>=2.9,<3` |
+| Providers | Google Gen AI SDK `>=1.0,<2`; HTTPX `>=0.27,<1` for 9Router |
+| Documents | pypdf `>=6.21.1,<7`; python-pptx `>=1.0.2,<2` |
+| RAG storage | PostgreSQL with pgvector; psycopg binary/pool `>=3.2,<4` |
+| Configuration | Environment variables; python-dotenv `>=1.0,<2` through Uvicorn's environment-file option |
+| Tests | pytest `>=8,<10`; additional development dependencies in `requirements-dev.txt` |
 
-## Trích xuất PDF/PPTX (2026-10-21)
+## Architecture and Project Structure
 
-`POST /internal/documents/extract?source_type=PDF&include_notes=false` nhận bytes
-`application/octet-stream`, xác thực `X-Internal-Token`. Không cần key Gemini,
-không gửi nội dung sang nhà cung cấp AI. `include_notes=true` chỉ dành cho PPTX
-và cần giảng viên chọn. Contract:
-[`document-extraction.openapi.json`](contracts/document-extraction.openapi.json).
-
-- Tối đa 20 MiB, 500 trang/slide, 1 triệu ký tự; giữ vị trí từ 1.
-- Kết quả `document-extraction.v1`: hash nguồn, loại file, tùy chọn notes,
-  `unit_count`, `spans[{kind,position,text}]`, warnings và trạng thái.
-- `EXTRACTED` là đã lấy text; `OCR_REQUIRED` là nguồn thiếu text/có trang ảnh
-  không lấy được text. Không đánh dấu index READY ở giai đoạn này.
-- pypdf/python-pptx chạy trong process con. ZIP được đọc theo ngân sách giải nén
-  thực tế rồi repack trước parser. Không chạy nội dung nhúng hoặc fetch URL.
-- Deadline 45s; tối đa 2 request/process, chờ slot 100ms. Hủy/quá hạn sẽ kill và
-  await process con. Trên Linux/POSIX: thêm cap 768 MiB virtual memory, 40s CPU,
-  output 8 MiB. Windows local chưa có OS memory cap tương đương; production dùng
-  Linux container với resource limits. Dockerfile không chứng minh đã deploy thật.
-- Lỗi: 401 token, 413 quá cỡ, 415 media type, 422 file/cấu hình sai, 503 hết năng
-  lực/infra, 504 deadline. Không lộ source, mật khẩu file hay traceback parser.
-
-Backend chạy `npm run start:document-worker` riêng sau khi áp migration local và
-build. UI: `/{locale}/lecturer/questions/documents`. Xem
-[hướng dẫn cả luồng](../testhub-v2-backend/docs/learning-documents.md).
-Cập nhật `.venv` hiện có bằng
-`.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt`; không chép đè `.env`.
-
-## Chạy local
-
-Yêu cầu **Python 3.12**; Gemini API key dùng cho sinh câu hỏi và embedding. Dockerfile dùng
-`python:3.12-slim`. Trong PowerShell, tại repo, kiểm tra `python --version` rồi tạo môi trường:
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-if (!(Test-Path .env)) { Copy-Item .env.example .env }
+```text
+TestHub web (:3000)
+  -> NestJS API (:3001) -> Redis/BullMQ -> dedicated NestJS workers
+       |                                      |
+       | business data, uploads, review        | X-Internal-Token
+       v                                      v
+  PostgreSQL + S3                      FastAPI (:8000)
+                                         |-- bounded parser subprocesses
+                                         |-- Gemini or 9Router generation
+                                         |-- Google embeddings
+                                         `-- PostgreSQL rag schema / pgvector
 ```
 
-Nếu `.venv` đã được tạo bằng phiên bản Python khác, hãy tạo lại bằng Python 3.12 trước khi cài dependency.
-
-Điền `GEMINI_API_KEY` và một chuỗi bí mật đủ mạnh vào `INTERNAL_API_TOKEN` trong `.env`. Giữ file này ở local, không commit. `GEMINI_MODEL` mặc định là `gemini-3.5-flash-lite`; có thể đổi sang model mà key của bạn được phép dùng. Chạy:
-
-```powershell
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --env-file .env --host 127.0.0.1 --port 8000
+```text
+app\
+  api\             Internal routes, authentication, error mapping
+  providers\       Gemini, 9Router, provider selection and fallback
+  schemas\         Request/response contracts and validation
+  services\        Generation, parsing, embedding, retrieval and storage
+  config.py        Environment defaults and validation
+  main.py          Application lifespan, health and readiness
+contracts\         Committed extraction and RAG contracts
+migrations\        Manual SQL bootstrap and RAG schema migrations
+postman\           Optional local embedding simulation
+scripts\           Contract export maintenance commands
+tests\             Offline tests and opt-in integration tests
+Dockerfile         Non-root Python 3.12 runtime image
 ```
 
-`GET /health` trả `{"status":"ok"}` mà không gọi Gemini. Swagger UI ở `http://127.0.0.1:8000/docs`. Chỉ bind `127.0.0.1` khi phát triển local; trong Docker, chỉ kết nối service này qua mạng nội bộ.
+The Python process has no Redis/BullMQ consumer and does not write business/question-bank tables. Parser subprocesses are resource-isolation helpers, not queue workers. Configure and operate the dedicated workers in the backend repository.
 
-### Dùng 9Router làm LLM sinh câu hỏi
+## Prerequisites
 
-Mặc định `LLM_PROVIDER=gemini`. Để sinh câu hỏi qua [9Router](https://github.com/decolua/9router) (OpenAI-compatible, `POST {ROUTER_BASE_URL}/chat/completions`, không streaming), đặt trong `.env`:
+- Python 3.12 and pip for local development. Windows and Linux execution paths are implemented.
+- A private internal token shared with NestJS for internal endpoints.
+- A Google API key for Gemini generation, Gemini fallback, or any enabled RAG embeddings.
+- A reachable OpenAI-compatible 9Router endpoint, API key, and supported model/combo when selecting 9Router.
+- A PostgreSQL database with pgvector and the separately provisioned `rag` schema when enabling RAG. Plain PostgreSQL alone is insufficient.
+- NestJS, its dedicated workers, Redis, and object storage for the complete application workflow; these are not provisioned by this repository.
+- Docker is optional. PostgreSQL administration/`psql` is needed only when provisioning RAG storage.
 
-```dotenv
-LLM_PROVIDER=9router
-ROUTER_BASE_URL=http://127.0.0.1:20128/v1
-ROUTER_API_KEY=<key tạo trong dashboard 9Router>
-ROUTER_MODEL=<model hoặc combo trong 9Router>
-```
+Extraction itself does not require an AI provider key or perform a paid model call. Generation without RAG does not require PostgreSQL.
 
-- `ROUTER_BASE_URL` phải là `http(s)://host[:port]/v1`, không chứa thông tin đăng nhập, query hay fragment. Trong Docker, `127.0.0.1` là chính container; dùng hostname/mạng nội bộ tới 9Router.
-- `ROUTER_TIMEOUT_MS` (mặc định 30000, 1–120000), `ROUTER_MAX_ATTEMPTS` (mặc định 1, 1–5; chỉ retry `408/429/500/502/503/504` và nằm trong `GENERATION_TIMEOUT_MS`), `ROUTER_MAX_OUTPUT_TOKENS` (mặc định 16384, 1–65536).
-- `ROUTER_RESPONSE_FORMAT=json_schema` (mặc định, strict) hoặc `json_object` (schema nhúng trong prompt) nếu model/upstream không hỗ trợ `json_schema`.
-- Kiểm tra số câu, đáp án, trích dẫn và contract NestJS/frontend không đổi. Quay lại Gemini bằng `LLM_PROVIDER=gemini`; không có fallback tự động.
-- **Embedding/RAG không đi qua 9Router**: `RAG_ENABLED=true` vẫn cần `GEMINI_API_KEY` và `RAG_DATABASE_URL`. Đổi LLM không cần reindex.
-- `/health` không chứng minh 9Router khả dụng; hãy chạy một lần smoke test bằng dữ liệu giả sau khi cấu hình.
+## Environment Configuration
 
-## Contract `POST /internal/generate`
+Copy the tracked [.env.example](.env.example) without overwriting an existing local file, then replace placeholders. Never commit actual credentials.
 
-Header bắt buộc: `X-Internal-Token: <INTERNAL_API_TOKEN>`.
+`Settings.from_env()` reads process environment during startup. It does **not** load `.env` automatically: use `--env-file .env` or inject variables through the process manager/container. Restart the service after changing configuration.
 
-```json
-{
-  "text": "Tìm kiếm nhị phân hoạt động trên mảng đã sắp xếp và có độ phức tạp O(log n).",
-  "topic": "Cấu trúc dữ liệu",
-  "question_configs": [
-    { "question_type": "SINGLE_CHOICE", "question_format": "KNOWLEDGE", "count": 1 }
-  ]
-}
-```
-
-- `text`: 20–20.000 ký tự sau khi bỏ khoảng trắng ở đầu/cuối.
-- `topic`: tùy chọn, tối đa 200 ký tự; chuỗi rỗng hoặc chỉ có khoảng trắng được chuyển thành `null`.
-- `question_configs`: 1–10 dòng `{question_type, question_format, count}`, tổng 1–20 câu. `question_type` là `SINGLE_CHOICE` hoặc `MULTIPLE_CHOICE`; `question_format` là `KNOWLEDGE`, `UNDERSTANDING`, `APPLYING` hoặc `ADVANCED`. Câu được sinh và kiểm tra theo đúng thứ tự các dòng.
-- Tương thích ngược: vẫn nhận dạng cũ `question_format` + `count` (1–20, một đáp án); không được gửi cùng lúc hai dạng. `/internal/rag/generate` dùng cùng quy tắc.
-
-Ví dụ kết quả:
-
-```json
-{
-  "questions": [
-    {
-      "question_text": "Độ phức tạp của tìm kiếm nhị phân là gì?",
-      "options": [
-        { "text": "O(1)", "isCorrect": false },
-        { "text": "O(log n)", "isCorrect": true },
-        { "text": "O(n)", "isCorrect": false },
-        { "text": "O(n²)", "isCorrect": false }
-      ],
-      "question_type": "SINGLE_CHOICE",
-      "question_format": "KNOWLEDGE",
-      "correct_answer": null
-    }
-  ]
-}
-```
-
-`question_text`, `options`, `question_type`, `question_format` và `correct_answer` dùng các tên trường của ngân hàng câu hỏi TestHub; khi tích hợp NestJS cần chuyển mảng `options` thành chuỗi JSON theo schema backend. Prototype gọi Gemini trong backend đã được gỡ; Python service là nơi thực hiện sinh câu hỏi. Service kiểm tra số câu, bốn lựa chọn khác nhau, số đáp án đúng theo loại câu ở từng vị trí (`SINGLE_CHOICE` đúng 1, `MULTIPLE_CHOICE` 2–3), độ dài và câu hỏi trùng. Việc kiểm chứng nội dung với tài liệu và duyệt cuối vẫn thuộc giảng viên/backend.
-
-Mã lỗi chính: `401` token thiếu/sai; `422` request sai; `503` thiếu cấu hình hoặc hết năng lực xử lý; `502` Gemini/9Router lỗi hoặc JSON không hợp lệ; `504` Gemini/9Router timeout. Nội dung lỗi upstream không chứa API key, prompt hay đoạn văn bản.
-
-## Cấu hình và xử lý lỗi
-
-Ứng dụng đọc biến môi trường một lần trong lifespan khi khởi động, tạo một Gemini client dùng chung cho mỗi process và đóng các transport khi dừng. Thay đổi `.env` cần khởi động lại ứng dụng. Thiếu key hoặc không khởi tạo được client thì `/internal/generate` trả `503`; `/health` vẫn là kiểm tra tiến trình, không xác nhận Gemini khả dụng. Cấu hình số không hợp lệ khiến startup thất bại với thông báo tên biến, không in giá trị bí mật.
-
-| Biến | Mặc định | Ý nghĩa |
+| Variable | Code default | Requirement and behavior |
 | --- | --- | --- |
-| `GEMINI_TIMEOUT_MS` | `30000` | Timeout HTTP của SDK, từ 1 đến 120.000 ms. |
-| `GENERATION_TIMEOUT_MS` | `30000` | Deadline tổng từ lúc vào service, gồm chờ suất xử lý, retry và kiểm tra JSON; từ 1 đến 180.000 ms. |
-| `GEMINI_MAX_ATTEMPTS` | `3` | Tổng số lần gọi tối đa, gồm lần đầu; từ 1 đến 5, đặt 1 để tắt retry. |
-| `MAX_CONCURRENT_GENERATIONS` | `4` | Số lượt sinh đồng thời trong mỗi process, từ 1 đến 100. Chờ suất tối đa 1 giây; hết suất trả `503`. |
+| `INTERNAL_API_TOKEN` | Empty | Required for internal endpoints. Use 32-256 visible ASCII characters to satisfy the NestJS client contract; match backend `AI_SERVICE_INTERNAL_TOKEN`. |
+| `LLM_PROVIDER` | `gemini` | `gemini` or `9router`; changes generation only. |
+| `GEMINI_API_KEY` | Empty | Required for Gemini generation, opt-in Gemini fallback, and RAG embeddings even with 9Router generation. |
+| `GEMINI_MODEL` | `gemini-3.5-flash-lite` | Generation model; select one available to the configured account. The default string is not an availability guarantee. |
+| `GEMINI_TIMEOUT_MS` | `30000` | Gemini call timeout, `1..120000`. |
+| `GENERATION_TIMEOUT_MS` | `30000` | Total generation budget, `1..180000`, including admission, provider retries, and output validation. |
+| `GROUNDED_GENERATION_TIMEOUT_MS` | `0` | `0..300000`; zero derives `max(75000, GENERATION_TIMEOUT_MS + 15000)`. An explicit value must be at least generation timeout + 15000. |
+| `GEMINI_MAX_ATTEMPTS` | `3` | `1..5`, including the first attempt; retries remain inside the total budget. |
+| `MAX_CONCURRENT_GENERATIONS` | `4` | `1..100` per Python process; generation-slot admission waits at most one second. |
+| `ROUTER_BASE_URL` | Empty | Required for 9Router; HTTP(S), path ending in `/v1`, without embedded credentials, query, fragment, backslashes, whitespace, or control characters. |
+| `ROUTER_API_KEY` | Empty | Required for 9Router; visible ASCII. |
+| `ROUTER_MODEL` | Empty | Required for 9Router; nonempty model or combo ID, without control characters. |
+| `ROUTER_TIMEOUT_MS` | `30000` | 9Router HTTP timeout, `1..120000`. |
+| `ROUTER_MAX_ATTEMPTS` | `1` | `1..5`, including the first attempt; retries remain inside the total budget. |
+| `ROUTER_MAX_OUTPUT_TOKENS` | `16384` | `1..65536`; must also be supported by the selected upstream model. |
+| `ROUTER_RESPONSE_FORMAT` | `json_schema` | `json_schema` or `json_object`; output validation remains mandatory. |
+| `LLM_FALLBACK_PROVIDER` | Empty | Optional `gemini` only; must differ from the primary provider and requires `GEMINI_API_KEY`. |
+| `RAG_ENABLED` | `false` | Exact lowercase `true` or `false`; enable only after RAG provisioning. |
+| `RAG_DATABASE_URL` | Empty | Required with RAG; use the restricted AI database role, not the backend business role. |
 
-Retry dùng exponential backoff có jitter, độ trễ tối đa 2 giây, cho HTTP `408`, `429`, `500`, `502`, `503`, `504` và lỗi kết nối/timeout do SDK hỗ trợ. Lỗi cố định như `400`/`401`/`403` và JSON sai không được thử lại. Mọi lần gọi vẫn nằm trong deadline tổng; hết deadline trả `504`, hủy tác vụ và giải phóng suất xử lý. Vì vậy deadline có thể kết thúc trước khi đủ số lần thử tối đa. Xem [cấu hình retry của SDK](https://googleapis.github.io/python-genai/genai.html#genai.types.HttpRetryOptions).
+The example file supplies illustrative `http://127.0.0.1:20128/v1` and PostgreSQL URLs; these are not code defaults or proof that those services exist. Blank token/router settings and placeholder Google credentials must be configured before use.
 
-Log lỗi Gemini chỉ ghi giai đoạn, tên loại exception và mã HTTP nếu có; không ghi exception message, traceback, key, prompt hay tài liệu nguồn. Lỗi đóng client được log riêng và không thay thế lỗi của request.
+### Provider selection and deadlines
 
-Ví dụ gọi local trong PowerShell (chạy sau khi cấu hình `.env`):
+9Router receives a non-streaming OpenAI-compatible `POST /v1/chat/completions`. This service chooses a model/combo, **not an individual Codex account**; account rotation and upstream rate-limit handling belong to 9Router.
 
-```powershell
-$body = @{ text = 'Tìm kiếm nhị phân hoạt động trên mảng đã sắp xếp và có độ phức tạp O(log n).'; topic = 'Cấu trúc dữ liệu'; question_configs = @(@{ question_type = 'SINGLE_CHOICE'; question_format = 'KNOWLEDGE'; count = 1 }) } | ConvertTo-Json -Depth 4
-Invoke-RestMethod -Uri 'http://127.0.0.1:8000/internal/generate' -Method Post -ContentType 'application/json' -Headers @{ 'X-Internal-Token' = '<giá trị INTERNAL_API_TOKEN của bạn>' } -Body $body
-```
+Optional Gemini fallback handles eligible connection/capacity/upstream availability failures. It does not handle timeouts, malformed output, invalid answers/citations, or evidence refusal. A timeout observed during a failed 9Router attempt retains timeout semantics even if a later attempt fails differently. Retrying or falling back cannot exceed the shared generation deadline.
 
-## Kiểm thử
+Keep nested deadlines ordered: backend outer deadline > grounded deadline > total generation deadline > selected provider HTTP timeout. Relevant defaults are:
 
-Contract tích hợp NestJS được cố định ở `contracts/text-generation.v1.json`;
-`tests/test_nestjs_contract.py` kiểm tra fixture qua FastAPI thật với provider giả.
-Backend đã có client và service kiểm tra quyền tại
-`../testhub-v2-backend/src/question-generation/`. Xem
-[hướng dẫn tích hợp](https://github.com/anhquan-ngg/testhub-v2-backend/blob/master/docs/ai-question-generation.md) để cấu hình
-`AI_SERVICE_INTERNAL_TOKEN` khớp `INTERNAL_API_TOKEN` và chạy test HTTP liên repo.
-Token cho client Node dùng 32–256 ký tự ASCII nhìn thấy được; deadline NestJS mặc
-định 35 giây, lớn hơn deadline Python 30 giây cho sinh câu từ văn bản. NestJS và
-frontend đã có batch/worker/staging, sửa/duyệt và commit. Trích xuất tài liệu dùng
-deadline riêng (Python 45s, NestJS mặc định 55s).
+| Operation | NestJS outer deadline | Python budget |
+| --- | --- | --- |
+| Text generation | `AI_SERVICE_TIMEOUT_MS=35000` | Generation `30000` ms |
+| Grounded generation | `max(85000, AI_SERVICE_TIMEOUT_MS)` | Derived grounded `75000` ms; generation `30000` ms |
+| Extraction | `DOCUMENT_SERVICE_TIMEOUT_MS=55000` | Parser `45000` ms |
 
-```powershell
-.\.venv\Scripts\python.exe -m pytest -q
-```
+Provider and generation defaults are both 30000 ms; they are not a tuned profile for slow models. An illustrative slower 9Router profile is router `100000`, generation `110000`, grounded `125000`, and backend `AI_SERVICE_TIMEOUT_MS=130000`. Apply related settings in their respective services and consider infrastructure/proxy timeouts and cost. Switching generation provider does not change the embedding profile or require reindexing.
 
-Test dùng provider giả lập và SDK thật với `httpx.MockTransport`, không cần key thật và không gọi mạng. Chúng kiểm tra contract, token ngoài ASCII, topic rỗng, JSON đầu ra, timeout, deadline/cancellation, concurrency, retry hữu hạn, vòng đời client và log an toàn. Lời gọi Gemini thật cần key hợp lệ; service không tự thực hiện smoke test thật.
+## Installation and Local Development
 
-## Khắc phục lỗi RAG
-
-### Grounded generation returns 422: insufficient evidence
-
-A valid model refusal is not malformed JSON. Grounded prompts use an internal
-outcome `{questions:[], unsupported_slots:[{slot:2, reason:"INSUFFICIENT_EVIDENCE"}]}`
-when any requested slot lacks support. Slots are 1-based in frozen-plan order,
-expanded by each item's count. The common parser checks unique, in-request slot
-numbers; legacy `{"questions":[]}` is accepted as an unspecified refusal.
-
-These outcomes return `RAG_INSUFFICIENT_EVIDENCE` (HTTP 422, not retryable), with
-optional `detail.diagnostics.issues` containing only slot and reason. An empty
-issues list means the deficient slots are unknown. Planned retrieval with no
-selected chunks returns the same code before calling the model, identifying the
-first deficient item's slots with `NO_RETRIEVED_CONTEXT`.
-
-NestJS maps this and older context-shortage codes to `AI_INSUFFICIENT_EVIDENCE`,
-persists sanitized failure details and exposes them on the owned batch detail.
-The vi/en UI explains known slots from the frozen plan, or explicitly says the
-slots are unknown. No drafts, automatic semantic retries, fallback or automatic
-batch splitting occur. Review objectives, cognitive levels, question formats and
-source pages before creating a new batch; fewer questions alone do not prove
-there is enough evidence. Existing FAILED batches are not rewritten.
-
-Malformed JSON/schema, contradictory partial questions/refusals, invalid slot
-numbers, wrong nonempty counts, answers or citations remain `RAG_OUTPUT_INVALID`
-(502). Public successful `rag-generation.v1` responses still require 1..20
-questions; text generation and Google embeddings are unchanged. Quote checks
-prove source matching, not semantic correctness (`UNASSESSED`).
-
-Retrieval logs include only slot ranges, candidate/chunk counts, context bytes
-and source-unit counts. Schema logs include error counts and at most five
-sanitized field locations/types, never inputs, messages, arbitrary JSON keys,
-source content or model output. No additional paid generation call is made to
-repair a refusal.
-
-### Planned generation returns 502
-
-The access log alone does not identify the failure. Inspect the preceding
-`generation_invalid_output reason=... mode=planned slot=...` or `gemini_failure`
-line. Planned schema and citation failures now emit sanitized diagnostics;
-question text, quotes, provider output and credentials remain private.
-
-`reason=duplicate_citations` in an older process means the model repeated a
-chunk ID within one question, not that questions duplicate the bank. Generation
-now validates every supplied quote against the question's authorized chunks,
-then merges repeated references into one exact contiguous source span (<=600
-characters). Identical references are deduplicated; different quotes from the
-same chunk retain all cited evidence in the merged span. An unknown chunk,
-unsupported quote or combined span over 600 characters still fails the batch.
-The returned contract retains one citation per chunk; answers are not modified.
-
-Restart AI after updating code. For a stable demo, omit `--reload`; for editing,
-limit watching to `--reload --reload-dir app` so test edits do not restart it.
-If interrupted Windows reloads print KeyboardInterrupt/BrokenPipeError/EOFError,
-stop Uvicorn with Ctrl+C and start it again; that traceback alone does not explain
-an earlier generation 502. Wait for `Application startup complete`.
-
-To intentionally generate a new batch from an unchanged approved plan in the
-current UI, reload the browser page, reopen the plan and generate. Repeated
-clicks in one page session reuse its Idempotency-Key and can return the failed
-batch; reloading the plan alone does not reset that key. No reupload/migration
-is needed for this citation fix, and old failed batches retain their status.
-
-### RAG generation fails with reason=answers
-
-`generation_invalid_output reason=answers` means the returned JSON passed shape
-validation but a question's `isCorrect` count does not match its requested type.
-SINGLE_CHOICE requires one true; MULTIPLE_CHOICE accepts two or three, never zero,
-one or all four. This is model-output validation, not a database/key setup error.
-
-Prompts now give every ordered slot an explicit four-option budget, targeting
-one correct/three distractors for single choice and two correct/two distractors
-for multiple choice. The SDK schema also constrains options to exactly four.
-Validation still accepts three supported correct options for existing multiple
-choice results. It never changes answer flags or silently reissues a paid call.
-Sanitized diagnostics identify the first failing slot, for example:
-
-```text
-generation_invalid_output reason=answers slot=2 question_type=MULTIPLE_CHOICE correct_count=1 option_count=4
-```
-
-Restart the AI service after updating code, then open the approved plan again
-and create a new generation batch. Existing failed batches are not overwritten.
-Prompt constraints reduce ambiguity but do not guarantee correct model output;
-lecturer review and server-side validation remain required.
-
-### RAG prepare fails with NotNullViolation
-
-Topic-owned documents may not have a chapter until approved questions are
-committed. If the database still has `rag.document_indexes.chapter_id NOT NULL`,
-apply migration 002 to the confirmed local database as its schema owner:
+Run commands from this repository. Clone it using the repository URL supplied by your project administrator; no public remote URL is assumed here.
 
 ```powershell
-psql -h 127.0.0.1 -p 5432 -U testhub_ai -d testhub -W -v ON_ERROR_STOP=1 -f migrations/002_optional_document_chapter.sql
+py -3.12 -m venv .venv
+& .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
-This preserves existing rows and allows a NULL chapter. Do not edit migration
-001 or invent a chapter ID. `/internal/rag/profile` does not check storage;
-`/ready` requires migrations 1/2 and the nullable chapter column. Restart the AI
-service after updating readiness code. Retry failed indexing from the document
-workspace; the original uploaded file need not be uploaded again. If a generation
-batch already failed, finish indexing before creating a new batch.
+Configure `.env` before starting. For minimal local extraction, set a valid `INTERNAL_API_TOKEN`. For generation, configure the chosen provider. For RAG, complete the database steps below and provide a Google API key.
 
-## Cấu trúc hiện có
-
-```text
-app/
-├── main.py
-├── config.py
-├── errors.py
-├── api/{generation,documents,rag,dependencies,errors}.py
-├── providers/{base,gemini,nine_router,factory}.py
-├── schemas/{question,document,rag,grounded_generation}.py
-├── services/{prompt_builder,question_generator,document_parser,document_parser_worker}.py
-├── services/{chunking,embedding,retrieval,rag_errors,grounded_generation}.py
-└── repositories/{vector_repository,windows_pool}.py
-migrations/{000_bootstrap,001_rag,002_optional_document_chapter}.sql
-contracts/{text-generation.v1,document-extraction.openapi,rag-indexing.openapi}.json
-scripts/{export_document_contract,export_rag_contract}.py
-tests/
-requirements.txt
-requirements-dev.txt
-Dockerfile
-.env.example
+```powershell
+& .\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload --env-file .env
 ```
 
-Parser PDF/PPTX, chunking, Google embedding, pgvector, retrieval và sinh câu RAG có
-trích dẫn đã được triển khai. OCR và provider khác vẫn là bước sau. NestJS
-giữ quyền truy cập, metadata, batch, bản nháp và duyệt/commit. Xem
-`CONTINUITY.md` local (nếu chưa có, tạo ghi chú trạng thái đã xác minh; file được
-gitignore, không thêm vào Git) và hướng dẫn backend cho trạng thái/lệnh chạy.
+- Process health: `http://127.0.0.1:8000/health`.
+- Storage readiness: `http://127.0.0.1:8000/ready`.
+- Interactive API reference: `http://127.0.0.1:8000/docs`.
+
+Health returns `{"status":"ok"}` without calling providers. With RAG disabled, readiness returns `{"status":"ok","rag":"disabled"}`; with RAG enabled it checks storage/schema readiness and returns 503 on failure. Neither endpoint proves that Google or 9Router can serve requests. RAG initialization failures may leave the process running but RAG unavailable.
+
+### RAG database provisioning
+
+Use an operator-approved local database. These examples use host `127.0.0.1`, database `testhub`, DBA role `postgres`, and AI role `testhub_ai`; substitute your approved connection details. Do not run them against shared/production databases without authorization and backups.
+
+1. A DBA applies [000_bootstrap.sql](migrations/000_bootstrap.sql). It enables pgvector in `public`, creates/checks the restricted AI login and schema ownership, and fails rather than silently weakening unsafe existing roles/schema.
+2. Set the AI role password interactively; do not embed it in SQL files or shell history.
+3. Apply migrations 001 and 002 as the restricted role, then configure `RAG_DATABASE_URL` and `RAG_ENABLED=true`.
+
+```powershell
+psql -h 127.0.0.1 -U postgres -d testhub -v ON_ERROR_STOP=1 -f migrations\000_bootstrap.sql
+psql -h 127.0.0.1 -U postgres -d testhub -c '\password testhub_ai'
+psql -h 127.0.0.1 -U testhub_ai -d testhub -v ON_ERROR_STOP=1 -f migrations\001_rag.sql
+psql -h 127.0.0.1 -U testhub_ai -d testhub -v ON_ERROR_STOP=1 -f migrations\002_optional_document_chapter.sql
+```
+
+Migrations are manual, not startup tasks, and separate from NestJS Prisma migrations. Readiness requires both migration versions and nullable `chapter_id` for topic-owned documents. The AI role owns only technical `rag` data; do not grant it business-table access. The profile endpoint alone does not verify the database schema.
+
+## Common Commands
+
+Python commands below use the local virtual environment explicitly; activation is not required.
+
+| Command | Purpose / side effect |
+| --- | --- |
+| `.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt` | Install runtime and development dependencies. |
+| `.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload --env-file .env` | Local development server. |
+| `.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --env-file .env` | Non-reloading server; restrict network access appropriately. |
+| `.\.venv\Scripts\python.exe -m pip check` | Check installed dependency compatibility. |
+| `.\.venv\Scripts\python.exe -m pytest -q` | Default test suite; real integration tests require explicit opt-in. |
+| `.\.venv\Scripts\python.exe -m pytest -q tests\test_nestjs_contract.py` | Focused offline internal-boundary contract tests. |
+| `.\.venv\Scripts\python.exe scripts\export_document_contract.py` | Maintenance only: rewrites the tracked extraction contract. |
+| `.\.venv\Scripts\python.exe scripts\export_rag_contract.py` | Maintenance only: rewrites the tracked RAG contract. |
+
+There is no configured project lint/typecheck/build command. Python package installation and contract export are not read-only verification steps.
+
+## Testing and Code Quality
+
+Default tests use fake providers, mocked transports, parser fixtures, and contract checks; a passing mock test does not certify a live provider. Review opt-in variables before running integration tests.
+
+- **Offline contract:** `tests\test_nestjs_contract.py` checks FastAPI boundaries. The test-only `tests\contract_http_server.py` launcher is used by backend cross-repository tests; it is not the production entry point.
+- **Google embedding simulation:** requires Postman CLI and the committed simulation; it is not a runtime dependency.
+
+```powershell
+postman simulation run postman\simulations\google-embedding.sim.yaml --port 4962 --no-history --output ndjson
+# In a separate terminal:
+$env:RUN_EMBEDDING_SIMULATION = '1'
+& .\.venv\Scripts\python.exe -m pytest -q tests\test_embedding_simulation.py
+```
+
+- **Real pgvector tests:** set `RAG_TEST_DATABASE_URL` only for a disposable database on `localhost`/`127.0.0.1` whose name ends in `_test`, with pgvector already installed. The tests require an absent `rag` schema and refuse an existing one. Never substitute production/runtime `RAG_DATABASE_URL`.
+- Contract exports intentionally update tracked artifacts. Inspect their diffs and synchronize backend consumers when changing contracts.
+
+## Service Integration
+
+### Endpoints and ownership
+
+Internal calls require `X-Internal-Token`; NestJS `AI_SERVICE_INTERNAL_TOKEN` must equal Python `INTERNAL_API_TOKEN`. A missing configured token makes internal functionality unavailable; a missing/wrong request token returns 401. RAG errors use `RAG_AUTH_UNAVAILABLE` or `RAG_UNAUTHORIZED` respectively.
+
+| Method | Endpoint | Responsibility |
+| --- | --- | --- |
+| `GET` | `/health`, `/ready` | Process and storage readiness; no internal token required. |
+| `POST` | `/internal/generate` | Text-based structured generation. |
+| `POST` | `/internal/documents/extract` | Binary PDF/PPTX extraction; `source_type=PDF` or `PPTX`, optional `include_notes=true` for PPTX only. |
+| `GET` | `/internal/rag/profile` | Embedding/chunking profile. |
+| `POST` | `/internal/rag/prepare`, `/internal/rag/step` | Prepare and advance fenced indexing. |
+| `POST` | `/internal/rag/retrieve` | Authorized scoped retrieval. |
+| `POST` | `/internal/rag/outline` | Source-wide outline proposal. |
+| `POST` | `/internal/rag/generate` | Grounded/planned generation. |
+| `POST` | `/internal/rag/revoke` | Revoke index access; returns 204. |
+
+NestJS downloads authorized S3 objects and sends bytes; Python does not accept arbitrary download URLs or need S3 credentials. Enable backend `AI_QUESTION_GENERATION_ENABLED` and, for RAG, `AI_RAG_ENABLED`; Python separately requires `RAG_ENABLED`. The backend base URL is an origin such as `http://127.0.0.1:8000`, not a URL ending in `/internal`.
+
+### Extraction and source eligibility
+
+Extraction accepts `application/octet-stream` bodies up to 20 MiB, at most 500 pages/slides, one million extracted characters, and an 8 MiB result. The parser deadline is 45 seconds with two simultaneous requests per process and a 100 ms admission wait. POSIX child limits are 768 MiB virtual memory and 40 CPU seconds; Windows has no equivalent OS memory cap here. Apply production container resource limits separately.
+
+Original 1-based `PAGE`/`SLIDE`/`NOTES` positions and offsets are preserved. No-text units with images are OCR-suspected; no-text/no-image units are classified separately as blank.
+
+- `EXTRACTED`: no OCR-suspected units and some extracted text. This status alone does not prove meaningful knowledge coverage.
+- `PARTIAL`: OCR-suspected units exist, but the remaining base text passes the usefulness heuristic. NestJS requires explicit owner consent before using partial content.
+- `OCR_REQUIRED`: missing usable text or an insufficient useful remainder. `NO_USABLE_TEXT` can describe a blank/textless file; the status is not proof of a scanned document.
+
+Partial eligibility discounts repeated short first/last lines, then requires at least 200 non-whitespace characters across two useful base units. This does not modify the original spans or silently discard pages. Extraction success/consent is separate from an index becoming `READY`; no OCR recognition is performed.
+
+### RAG and generation contracts
+
+- Embeddings stay on `gemini-embedding-001`: 768 dimensions, L2 normalization, explicit document/query tasks. 9Router does not replace this dependency.
+- Chunks target 1200 UTF-8 bytes, maximum 1800, with 200-byte overlap; maximum 5000 chunks and embedding batches of 16.
+- General retrieval defaults to six chunks, maximum eight, across 1-10 unique indexes with a 12 KB context budget. Planned retrieval caps context at two chunks per item and 72 KB total, with source-unit filtering before nearest-neighbor limiting.
+- Only authorized `READY` owner/index/profile scopes are searchable. Revocation tombstones, fenced indexing leases, and pre/post-I/O scope checks prevent stale access.
+- Outlines are editable source-wide heuristics, not paid semantic plans or a guarantee of document completeness. Existing saved plans are not silently rewritten.
+- Text generation accepts 20-20000 characters and an optional topic of at most 200 characters. Use 1-20 `question_configs` rows, each count 1-20, with 1-20 total questions. Legacy `question_format` + `count` is accepted only without `question_configs`.
+- Types are `SINGLE_CHOICE` and `MULTIPLE_CHOICE`, not essay. Cognitive levels are `KNOWLEDGE`, `UNDERSTANDING`, `APPLYING`, and `ADVANCED`; single-choice has one correct option, multiple-choice two or three.
+- Grounded success has 1-20 questions and `quality_status=UNASSESSED`. Exact citations prove source provenance, not semantic entailment, answer correctness, or full-document coverage. Quotes referencing the same chunk are validated individually and merged only into an exact contiguous span of at most 600 characters.
+- Planned slot context is isolated and ordered. Generation is atomic: no partial drafts, automatic semantic retries, automatic batch splitting, evidence-triggered provider fallback, or automatic bank commit. NestJS/frontend own review and explicit approval.
+
+A valid model evidence refusal, including legacy empty-question output, becomes HTTP 422 `RAG_INSUFFICIENT_EVIDENCE`, mapped by NestJS to `AI_INSUFFICIENT_EVIDENCE`. Optional sanitized diagnostics identify 1-based frozen-plan slots. Planned retrieval can emit the same code with `NO_RETRIEVED_CONTEXT` before calling a model. Malformed output, partial questions mixed with refusals, invalid slots/counts/answers/citations remain 502 `RAG_OUTPUT_INVALID`. Historical failed batches are not rewritten after code/configuration changes.
+
+## Deployment and Production
+
+The [Dockerfile](Dockerfile) installs runtime dependencies, copies `app`, runs as a non-root user, exposes 8000, and starts Uvicorn without reload. It does not include tests, contracts, or migrations; provision the database from the checkout separately.
+
+```powershell
+docker build -t testhub-ai-service .
+docker run --rm --name testhub-ai-service --env-file .env -p 127.0.0.1:8000:8000 testhub-ai-service
+```
+
+These are local image commands, not evidence of a completed deployment. This repository has no Compose stack or deployment workflow. Inject secrets at runtime, restrict internal endpoints to a private network, add resource limits, and monitor readiness and sanitized provider errors. Per-process concurrency limits multiply when scaling processes/replicas.
+
+Inside a container, `127.0.0.1` refers to the container, not host PostgreSQL or 9Router. Use an appropriate private service address; when using Docker Desktop, an explicitly configured `host.docker.internal` address can reach host services. Do not expose the internal token publicly. Dependency ranges are not a reproducible lock; validate the built image in your deployment environment.
+
+## Troubleshooting
+
+| Symptom | Checks and interpretation |
+| --- | --- |
+| Internal 401 or auth-unavailable 503 | Compare the two service token settings, header presence, visible-ASCII/length requirements, environment-file loading, and restart state. Do not log tokens. |
+| Startup configuration error | Check exact lowercase booleans, numeric bounds, URL shape, selected provider credentials, and grounded/generation timeout relationship. |
+| `/health` succeeds but RAG fails | Health is process-only. Check `/ready`, RAG flags, pgvector, restricted role, migrations 001/002, database access, and Google credentials. Readiness does not call providers. |
+| Topic-owned indexing fails with a non-null chapter constraint | Apply approved migration 002; do not patch generated business schemas or remove scope checks. |
+| HTTP 422 from RAG | Inspect the sanitized response code: input validation can be `RAG_INPUT_INVALID`; valid empty/refusal output can be `RAG_INSUFFICIENT_EVIDENCE`. A status/access-log line alone is insufficient. Reduce unsupported slots or improve source context after reviewing diagnostics. |
+| HTTP 502 / invalid structured output | Check model JSON/schema support, output-token budget, counts, answer flags, and citation validity. Switching response format does not disable validation. |
+| HTTP 504 or rate-limited Codex account | Inspect nested deadlines and 9Router account/combo routing. AI cannot select a healthy individual account. Timeouts do not trigger Gemini fallback; fix routing or tune bounded budgets deliberately. |
+| `OCR_REQUIRED` despite some extracted text | Inspect per-unit diagnostics and usefulness rather than the text-presence ratio alone. `PARTIAL` requires explicit consent; blank/header-only content is not automatically usable. No OCR engine runs here. |
+| Windows extraction/indexing problems | Parser code supports Proactor subprocesses and a threaded fallback on Selector loops; RAG storage owns a selector-loop thread. Confirm Python 3.12, restart after configuration changes, and inspect sanitized logs. |
+| Host setup works but a container fails | Replace container-local loopback addresses with reachable database/router addresses and check networking/secrets. |
+
+Do not log document text, model output, credentials, or full provider payloads while investigating failures. Record sanitized error codes, schema locations, counts, timing, and slot diagnostics instead.
+
+## Further Documentation
+
+- [Frontend README](../testhub-v2/README.md) and [backend README](../testhub-v2-backend/README.md): application setup and worker ownership.
+- [Backend AI question generation](../testhub-v2-backend/docs/ai-question-generation.md), [learning documents](../testhub-v2-backend/docs/learning-documents.md), and [RAG indexing](../testhub-v2-backend/docs/rag-indexing.md).
+- [Runtime dependencies](requirements.txt), [development dependencies](requirements-dev.txt), [contracts](contracts), and [RAG migrations](migrations).
+
+Sibling links assume the three repositories are checked out side by side; they may not resolve in a standalone hosted repository view.
