@@ -26,6 +26,12 @@ class Settings:
     router_response_format: str = "json_schema"
     llm_fallback_provider: str = ""
     grounded_timeout_ms: int = 0  # 0 = derive from generation_timeout_ms
+    embedding_max_rpm: int = 60
+    embedding_max_concurrency: int = 2
+    embedding_max_attempts: int = 4
+    embedding_max_backoff_ms: int = 8_000
+    embedding_retry_budget_ms: int = 15_000
+    embedding_cache_size: int = 2_048
 
     def __post_init__(self) -> None:
         if self.llm_provider not in ("gemini", "9router"):
@@ -68,10 +74,18 @@ class Settings:
             "router_max_attempts": (1, 5),
             "router_max_output_tokens": (1, 65_536),
             "grounded_timeout_ms": (0, 300_000),
+            "embedding_max_rpm": (1, 10_000),
+            "embedding_max_concurrency": (1, 16),
+            "embedding_max_attempts": (1, 6),
+            "embedding_max_backoff_ms": (0, 30_000),
+            # Must stay well under RagService's 40s operation deadline.
+            "embedding_retry_budget_ms": (0, 30_000),
+            "embedding_cache_size": (0, 100_000),
         }
         for name, (minimum, maximum) in bounds.items():
             if not minimum <= getattr(self, name) <= maximum:
-                raise ValueError(f"{name.upper()} must be between {minimum} and {maximum}")
+                env_name = "GROUNDED_GENERATION_TIMEOUT_MS" if name == "grounded_timeout_ms" else name.upper()
+                raise ValueError(f"{env_name} must be between {minimum} and {maximum}")
         if self.grounded_timeout_ms and self.grounded_timeout_ms < self.generation_timeout_ms + 15_000:
             raise ValueError("GROUNDED_GENERATION_TIMEOUT_MS must be at least GENERATION_TIMEOUT_MS + 15000")
 
@@ -112,4 +126,10 @@ class Settings:
             router_response_format=os.getenv("ROUTER_RESPONSE_FORMAT", "json_schema").strip(),
             llm_fallback_provider=os.getenv("LLM_FALLBACK_PROVIDER", "").strip(),
             grounded_timeout_ms=integer("GROUNDED_GENERATION_TIMEOUT_MS", 0),
+            embedding_max_rpm=integer("EMBEDDING_MAX_RPM", 60),
+            embedding_max_concurrency=integer("EMBEDDING_MAX_CONCURRENCY", 2),
+            embedding_max_attempts=integer("EMBEDDING_MAX_ATTEMPTS", 4),
+            embedding_max_backoff_ms=integer("EMBEDDING_MAX_BACKOFF_MS", 8_000),
+            embedding_retry_budget_ms=integer("EMBEDDING_RETRY_BUDGET_MS", 15_000),
+            embedding_cache_size=integer("EMBEDDING_CACHE_SIZE", 2_048),
         )

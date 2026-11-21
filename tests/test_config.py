@@ -112,6 +112,13 @@ def test_grounded_deadline_accepts_sufficient_headroom(override: int) -> None:
     settings = Settings(generation_timeout_ms=110_000, grounded_timeout_ms=override)
     assert settings.effective_grounded_timeout_ms == override
 
+@pytest.mark.parametrize("override", [-1, 300_001])
+def test_grounded_bounds_name_the_public_environment_variable(override: int) -> None:
+    """Bounds failures identify the actual configurable environment key."""
+    with pytest.raises(ValueError, match="GROUNDED_GENERATION_TIMEOUT_MS must be between 0 and 300000"):
+        Settings(grounded_timeout_ms=override)
+
+
 def test_fallback_and_grounded_deadline_config(monkeypatch) -> None:
     base = {"gemini_api_key": "gemini-test-key", "llm_provider": "9router", "router_api_key": "router-test-key", "router_model": "m", "router_base_url": "http://127.0.0.1:20128/v1"}
     assert Settings(**base).effective_grounded_timeout_ms == 75_000

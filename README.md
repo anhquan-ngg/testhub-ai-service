@@ -101,6 +101,12 @@ Copy the tracked [.env.example](.env.example) without overwriting an existing lo
 | `LLM_FALLBACK_PROVIDER` | Empty | Optional `gemini` only; must differ from the primary provider and requires `GEMINI_API_KEY`. |
 | `RAG_ENABLED` | `false` | Exact lowercase `true` or `false`; enable only after RAG provisioning. |
 | `RAG_DATABASE_URL` | Empty | Required with RAG; use the restricted AI database role, not the backend business role. |
+| `EMBEDDING_MAX_RPM` | `60` | `1..10000`; per-process budget of embedded **items** per sliding minute (conservative: batch items are counted individually). Divide by the process/replica count. |
+| `EMBEDDING_MAX_CONCURRENCY` | `2` | `1..16`; in-flight embedding HTTP calls per process. |
+| `EMBEDDING_MAX_ATTEMPTS` | `4` | `1..6`, including the first attempt; only 429/5xx/transport errors retry. |
+| `EMBEDDING_MAX_BACKOFF_MS` | `8000` | `0..30000`; a server `Retry-After`/`RetryInfo` longer than this fails fast with `RAG_EMBEDDING_RATE_LIMITED`. |
+| `EMBEDDING_RETRY_BUDGET_MS` | `15000` | `0..30000`; total wait (limiter + backoff) per embedding call, kept below the 40 s RAG deadline. |
+| `EMBEDDING_CACHE_SIZE` | `2048` | `0..100000`; in-memory LRU of vectors keyed by model/dimensions/task/text hash; `0` disables. |
 
 The example file supplies illustrative `http://127.0.0.1:20128/v1` and PostgreSQL URLs; these are not code defaults or proof that those services exist. Blank token/router settings and placeholder Google credentials must be configured before use.
 
@@ -146,7 +152,7 @@ Health returns `{"status":"ok"}` without calling providers. With RAG disabled, r
 
 Use an operator-approved local database. These examples use host `127.0.0.1`, database `testhub`, DBA role `postgres`, and AI role `testhub_ai`; substitute your approved connection details. Do not run them against shared/production databases without authorization and backups.
 
-1. A DBA applies [000_bootstrap.sql](migrations/000_bootstrap.sql). It enables pgvector in `public`, creates/checks the restricted AI login and schema ownership, and fails rather than silently weakening unsafe existing roles/schema.
+1. A DBA applies [000_bootstrap.sql](migrations/000_bootstrap.sql). It enables pgvector in `public`, creates/checks the restricted AI login and schema ownership, and fails rather than silently weakening unsafe existing roles/schema. The bootstrap runs atomically with `ON_ERROR_STOP`; an existing pgvector installation outside `public` is rejected without relocation, and failed checks roll back the bootstrap changes.
 2. Set the AI role password interactively; do not embed it in SQL files or shell history.
 3. Apply migrations 001 and 002 as the restricted role, then configure `RAG_DATABASE_URL` and `RAG_ENABLED=true`.
 
@@ -217,27 +223,81 @@ NestJS downloads authorized S3 objects and sends bytes; Python does not accept a
 
 Extraction accepts `application/octet-stream` bodies up to 20 MiB, at most 500 pages/slides, one million extracted characters, and an 8 MiB result. The parser deadline is 45 seconds with two simultaneous requests per process and a 100 ms admission wait. POSIX child limits are 768 MiB virtual memory and 40 CPU seconds; Windows has no equivalent OS memory cap here. Apply production container resource limits separately.
 
-Original 1-based `PAGE`/`SLIDE`/`NOTES` positions and offsets are preserved. No-text units with images are OCR-suspected; no-text/no-image units are classified separately as blank.
+Original 1-based `PAGE`/`SLIDE`/`NOTES` positions and offsets are preserved. OCR classification also considers repeated-margin removal and inherited slide background images, including theme references (`p:bgRef`); an explicit local background overrides layout/master backgrounds. No-text/no-image units remain blank. PPTX entries are checked against actual decompressed-byte budgets and integrity before repacking. Parser shutdown waits for in-progress spawns and worker cleanup; cancellation or an `OSError` while killing a child does not release its intake slot or temporary-file ownership before the child exits and is reaped.
 
-- `EXTRACTED`: no OCR-suspected units and some extracted text. This status alone does not prove meaningful knowledge coverage.
+- `EXTRACTED`: no OCR-suspected units and some text remains after boundary filtering, or extracted slide notes are available. This status alone does not prove meaningful knowledge coverage.
 - `PARTIAL`: OCR-suspected units exist, but the remaining base text passes the usefulness heuristic. NestJS requires explicit owner consent before using partial content.
 - `OCR_REQUIRED`: missing usable text or an insufficient useful remainder. `NO_USABLE_TEXT` can describe a blank/textless file; the status is not proof of a scanned document.
 
-Partial eligibility discounts repeated short first/last lines, then requires at least 200 non-whitespace characters across two useful base units. This does not modify the original spans or silently discard pages. Extraction success/consent is separate from an index becoming `READY`; no OCR recognition is performed.
+Both `EXTRACTED` and `PARTIAL` require at least one nonblank text span, including legacy payloads without `quality`. When supplied, `quality.text_units` equals the number of nonblank `PAGE`/`SLIDE` spans, excludes `NOTES`, and may overlap `ocr_suspected_units` for pages/slides containing both text and images.
+
+Usefulness and OCR classification discount entire contiguous boundary blocks of short lines (at most 100 normalized characters) appearing in at least two and at least half of nonempty base units. Repeated interior lines remain body content and count toward usefulness; a short body repeated at the boundary is conservatively treated as a margin. Margin-only sources return `OCR_REQUIRED` and cannot be chunked, even without images (`NO_USABLE_TEXT`). Partial eligibility requires at least 200 non-whitespace characters across two useful base units, or one for a two-unit document. These checks do not modify original spans: accepted sources retain their text, including margins, and exact offsets in chunks. Extraction success/consent is separate from an index becoming `READY`; no OCR recognition is performed.
 
 ### RAG and generation contracts
 
 - Embeddings stay on `gemini-embedding-001`: 768 dimensions, L2 normalization, explicit document/query tasks. 9Router does not replace this dependency.
 - Chunks target 1200 UTF-8 bytes, maximum 1800, with 200-byte overlap; maximum 5000 chunks and embedding batches of 16.
+- Embedding calls share a per-process item limiter, a concurrency cap, an LRU cache and in-call dedup; planned retrieval embeds identical objective queries once. Retries use jittered exponential backoff and honor `Retry-After`/`RetryInfo`; daily-quota 429s return non-retryable `RAG_EMBEDDING_QUOTA_EXHAUSTED` and stop calls for 5 minutes. Exhausted per-minute retries return retryable 503 `RAG_EMBEDDING_RATE_LIMITED`. Each call logs `embedding_call` (items, unique, cache hits, attempts, outcome, latency) without text. Attempts count actual requests within that invocation, including failure paths: zero before sending, one after one send, and the full retry total on exhaustion; concurrent calls do not share this counter. `scripts/benchmark_embedding_mock.py` compares behaviors against a mock rate-limited server only. Its CPython 3.12 virtual event scheduler shares one clock across concurrent jobs, mock-server latency, retries and deadlines, with deterministic midpoint jitter and no scaled real-time sleeps. Results model the synthetic scenarios, not live Gemini quota guarantees.
 - General retrieval defaults to six chunks, maximum eight, across 1-10 unique indexes with a 12 KB context budget. Planned retrieval caps context at two chunks per item and 72 KB total, with source-unit filtering before nearest-neighbor limiting.
+- Generation storage failures use the existing `retryable` flag as a phase guarantee: `RAG_STORAGE_UNAVAILABLE` is retryable only before any model call. Post-model scope-check failures, including typed upstream errors and timeouts, are non-retryable so a retry cannot repeat a paid generation. Nest also excludes ambiguous `RAG_DEADLINE` failures from automatic retries.
+- Embedding admission rechecks cooldown and quota breakers after concurrency waits, and records RPM usage only when a send can begin. `Retry-After` accepts seconds or HTTP dates; batches larger than the configured per-minute item limit are rejected before sending. Indexing leases refund a claim only when its token still matches and the adapter proves no upstream request started; incurred or ambiguous upstream usage is never reset.
 - Only authorized `READY` owner/index/profile scopes are searchable. Revocation tombstones, fenced indexing leases, and pre/post-I/O scope checks prevent stale access.
 - Outlines are editable source-wide heuristics, not paid semantic plans or a guarantee of document completeness. Existing saved plans are not silently rewritten.
 - Text generation accepts 20-20000 characters and an optional topic of at most 200 characters. Use 1-20 `question_configs` rows, each count 1-20, with 1-20 total questions. Legacy `question_format` + `count` is accepted only without `question_configs`.
 - Types are `SINGLE_CHOICE` and `MULTIPLE_CHOICE`, not essay. Cognitive levels are `KNOWLEDGE`, `UNDERSTANDING`, `APPLYING`, and `ADVANCED`; single-choice has one correct option, multiple-choice two or three.
 - Grounded success has 1-20 questions and `quality_status=UNASSESSED`. Exact citations prove source provenance, not semantic entailment, answer correctness, or full-document coverage. Quotes referencing the same chunk are validated individually and merged only into an exact contiguous span of at most 600 characters.
-- Planned slot context is isolated and ordered. Generation is atomic: no partial drafts, automatic semantic retries, automatic batch splitting, evidence-triggered provider fallback, or automatic bank commit. NestJS/frontend own review and explicit approval.
+- Planned slot context is isolated and ordered; plans require exactly one index and at most 20 items/20 total questions. Two chunks of at most 1800 bytes per item fit within the 72 KB context budget. Generation is atomic: no partial drafts, automatic semantic retries, automatic batch splitting, evidence-triggered provider fallback, or automatic bank commit. NestJS/frontend own review and explicit approval.
 
 A valid model evidence refusal, including legacy empty-question output, becomes HTTP 422 `RAG_INSUFFICIENT_EVIDENCE`, mapped by NestJS to `AI_INSUFFICIENT_EVIDENCE`. Optional sanitized diagnostics identify 1-based frozen-plan slots. Planned retrieval can emit the same code with `NO_RETRIEVED_CONTEXT` before calling a model. Malformed output, partial questions mixed with refusals, invalid slots/counts/answers/citations remain 502 `RAG_OUTPUT_INVALID`. Historical failed batches are not rewritten after code/configuration changes.
+
+## Contract `POST /internal/generate`
+
+The request rows expand into ordered slots. The server supplies each slot's type and cognitive level; a single-choice slot requires exactly one correct option, while a multiple-choice slot requires two or three. Do not combine `question_configs` with the legacy `question_format`/`count` fields.
+
+Example request (synthetic source text):
+
+```json
+{
+  "text": "Stacks use LIFO ordering; queues use FIFO ordering.",
+  "question_configs": [
+    {"question_type": "SINGLE_CHOICE", "question_format": "KNOWLEDGE", "count": 1},
+    {"question_type": "MULTIPLE_CHOICE", "question_format": "UNDERSTANDING", "count": 1}
+  ]
+}
+```
+
+Example response (illustrative only, not a provider result):
+
+```json
+{
+  "questions": [
+    {
+      "question_text": "Which ordering does a stack use?",
+      "question_type": "SINGLE_CHOICE",
+      "question_format": "KNOWLEDGE",
+      "correct_answer": null,
+      "options": [
+        {"text": "LIFO", "isCorrect": true},
+        {"text": "FIFO", "isCorrect": false},
+        {"text": "Random", "isCorrect": false},
+        {"text": "Sorted", "isCorrect": false}
+      ]
+    },
+    {
+      "question_text": "Which statements match the source?",
+      "question_type": "MULTIPLE_CHOICE",
+      "question_format": "UNDERSTANDING",
+      "correct_answer": null,
+      "options": [
+        {"text": "Stacks use LIFO", "isCorrect": true},
+        {"text": "Queues use FIFO", "isCorrect": true},
+        {"text": "Stacks use FIFO", "isCorrect": false},
+        {"text": "Queues use LIFO", "isCorrect": false}
+      ]
+    }
+  ]
+}
+```
 
 ## Deployment and Production
 
@@ -262,6 +322,7 @@ Inside a container, `127.0.0.1` refers to the container, not host PostgreSQL or 
 | Topic-owned indexing fails with a non-null chapter constraint | Apply approved migration 002; do not patch generated business schemas or remove scope checks. |
 | HTTP 422 from RAG | Inspect the sanitized response code: input validation can be `RAG_INPUT_INVALID`; valid empty/refusal output can be `RAG_INSUFFICIENT_EVIDENCE`. A status/access-log line alone is insufficient. Reduce unsupported slots or improve source context after reviewing diagnostics. |
 | HTTP 502 / invalid structured output | Check model JSON/schema support, output-token budget, counts, answer flags, and citation validity. Switching response format does not disable validation. |
+| `RAG_EMBEDDING_RATE_LIMITED` / `RAG_EMBEDDING_QUOTA_EXHAUSTED` | Google embedding quota is per project across all keys and processes. Check `embedding_call`/`embedding_retry` logs and AI Studio usage; lower `EMBEDDING_MAX_RPM` to the real tier or per replica. Daily quota resets at midnight Pacific; do not rotate keys to bypass it. |
 | HTTP 504 or rate-limited Codex account | Inspect nested deadlines and 9Router account/combo routing. AI cannot select a healthy individual account. Timeouts do not trigger Gemini fallback; fix routing or tune bounded budgets deliberately. |
 | `OCR_REQUIRED` despite some extracted text | Inspect per-unit diagnostics and usefulness rather than the text-presence ratio alone. `PARTIAL` requires explicit consent; blank/header-only content is not automatically usable. No OCR engine runs here. |
 | Windows extraction/indexing problems | Parser code supports Proactor subprocesses and a threaded fallback on Selector loops; RAG storage owns a selector-loop thread. Confirm Python 3.12, restart after configuration changes, and inspect sanitized logs. |

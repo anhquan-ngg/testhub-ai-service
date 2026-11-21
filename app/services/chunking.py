@@ -26,7 +26,7 @@ def chunk_document(index_id: UUID, extraction: ExtractionResult) -> list[Chunk]:
         raise RagError("RAG_OCR_REQUIRED")
     chunks: list[Chunk] = []
     for span in extraction.spans:
-        text, cursor = span.text, 0
+        text, cursor, emitted_end = span.text, 0, 0
         while cursor < len(text):
             while cursor < len(text) and text[cursor].isspace():
                 cursor += 1
@@ -47,6 +47,10 @@ def chunk_document(index_id: UUID, extraction: ExtractionResult) -> list[Chunk]:
                 end -= 1
             if end <= cursor:
                 raise RagError("RAG_CHUNKING_FAILED")
+            if end <= emitted_end:
+                # An overlap-only window can precede a long whitespace gap.
+                cursor = emitted_end
+                continue
             content = text[cursor:end]
             digest = hashlib.sha256(content.encode()).hexdigest()
             ordinal = len(chunks)
@@ -57,6 +61,7 @@ def chunk_document(index_id: UUID, extraction: ExtractionResult) -> list[Chunk]:
                 ordinal=ordinal, kind=span.kind, position=span.position,
                 start_offset=cursor, end_offset=end, text=content, text_sha256=digest,
             ))
+            emitted_end = end
             if end >= len(text):
                 break
             next_cursor, overlap = end, 0

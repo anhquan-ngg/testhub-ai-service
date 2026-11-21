@@ -90,13 +90,20 @@ def test_intake_slots_are_released_before_slow_application_work():
         async def send(message):
             responses.append(message)
         tasks = [asyncio.create_task(limiter(intake_scope(), receive, send)) for _ in range(5)]
+        failed = False
         try:
             await asyncio.wait_for(all_entered.wait(), 1)
             assert limiter.slots._value == 4
             assert not responses
+        except BaseException:
+            failed = True
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            raise
         finally:
             finish.set()
-            await asyncio.gather(*tasks)
+            await asyncio.gather(*tasks, return_exceptions=failed)
     asyncio.run(run())
 
 
@@ -127,13 +134,18 @@ def test_failed_intake_never_calls_application(monkeypatch, mode, status):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("path", ["generate", "profile", "prepare", "step", "retrieve", "revoke"])
+@pytest.mark.parametrize("path", ["generate", "outline", "profile", "prepare", "step", "retrieve", "revoke"])
 def test_rag_openapi_and_auth_use_shared_error_shape(path):
     with TestClient(create_app(Settings(internal_api_token="fixture-token"))) as client:
         response = client.get(f"/internal/rag/{path}") if path == "profile" else client.post(f"/internal/rag/{path}", json={})
         assert response.status_code == 401
         assert RagErrorResponse.model_validate(response.json()).detail.retryable is False
         operation = client.app.openapi()["paths"][f"/internal/rag/{path}"]["get" if path == "profile" else "post"]
+        assert operation["security"] == [{"InternalToken": []}]
+        assert not any(parameter["name"].lower() == "x-internal-token" for parameter in operation.get("parameters", []))
+        assert client.app.openapi()["components"]["securitySchemes"]["InternalToken"] == {
+            "type": "apiKey", "in": "header", "name": "x-internal-token",
+        }
         for status in (401, 404, 408, 409, 413, 422, 502, 503, 504):
             schema = operation["responses"][str(status)]["content"]["application/json"]["schema"]
             assert schema == {"$ref": "#/components/schemas/RagErrorResponse"}

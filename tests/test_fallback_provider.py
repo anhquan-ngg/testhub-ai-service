@@ -39,6 +39,8 @@ def test_primary_success_skips_fallback_and_close_closes_both():
     assert primary.closed and fallback.closed
 
 def test_fallback_failure_propagates():
-    provider = FallbackProvider(Stub(ProviderUnavailableError("x")), Stub(ProviderError("y")))
-    with pytest.raises(ProviderError):
+    fallback_error = ProviderError("y")
+    provider = FallbackProvider(Stub(ProviderUnavailableError("x")), Stub(fallback_error))
+    with pytest.raises(ProviderError) as exc:
         run(provider.generate("p"))
+    assert exc.value is fallback_error

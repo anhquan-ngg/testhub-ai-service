@@ -88,7 +88,7 @@ class VectorRepository:
             return await self._scoped(db, request)
 
     async def claim(self, command: IndexCommand, token: UUID) -> tuple[dict, list[dict]]:
-        """Lease one bounded embedding batch and persist its invocation budget first."""
+        """Reserve one invocation conservatively; refund only token-fenced proven-unsent work."""
         async with self.pool.connection() as db:
             row = await self._scoped(db, command, lock=True)
             if row["status"] == "READY":
@@ -106,7 +106,7 @@ class VectorRepository:
                 AND embedding IS NULL ORDER BY ordinal LIMIT %s""", (command.index_id, BATCH_SIZE))).fetchall()
             return row, chunks
 
-    async def save(self, command: IndexCommand, token: UUID, vectors: list[tuple[UUID,list[float]]]) -> dict:
+    async def save(self, command: IndexCommand, token: UUID, vectors: list[tuple[UUID,list[float]]], *, refund_attempt: bool = False) -> dict:
         """Commit checked vectors and READY atomically under the current lease."""
         async with self.pool.connection() as db:
             await self._scoped(db, command, lock=True)
@@ -120,13 +120,17 @@ class VectorRepository:
             count = await (await db.execute("SELECT count(*) AS n FROM rag.chunks WHERE index_id=%s AND embedding IS NOT NULL", (command.index_id,))).fetchone()
             await db.execute("""UPDATE rag.document_indexes SET completed_chunks=%s,
                 status=CASE WHEN chunk_count=%s THEN 'READY' ELSE 'BUILDING' END,
-                lease_token=NULL,lease_expires_at=NULL,updated_at=clock_timestamp() WHERE id=%s""",
-                (count["n"], count["n"], command.index_id))
+                attempt_count=attempt_count-%s,
+                lease_token=NULL,lease_expires_at=NULL,updated_at=clock_timestamp() WHERE id=%s AND lease_token=%s""",
+                (count["n"], count["n"], int(refund_attempt), command.index_id, token))
             return await self._scoped(db, command)
 
-    async def release(self, index_id: UUID, token: UUID) -> None:
+    async def release(self, index_id: UUID, token: UUID, *, refund_attempt: bool = False) -> None:
+        """Release once; a stale/repeated token can never refund an invocation reservation."""
         async with self.pool.connection() as db:
-            await db.execute("UPDATE rag.document_indexes SET lease_token=NULL,lease_expires_at=NULL WHERE id=%s AND lease_token=%s", (index_id, token))
+            await db.execute("""UPDATE rag.document_indexes SET lease_token=NULL,lease_expires_at=NULL,
+                attempt_count=attempt_count-%s WHERE id=%s AND lease_token=%s""",
+                (int(refund_attempt), index_id, token))
 
     async def validate_scope(self, owner: UUID, profile: str, indexes: list[UUID]) -> None:
         async with self.pool.connection() as db:

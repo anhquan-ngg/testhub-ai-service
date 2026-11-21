@@ -192,8 +192,8 @@ def test_repeated_margins_preserve_useful_page_bodies(client: TestClient) -> Non
     from app.schemas.document import ExtractionResult
     from app.services.chunking import chunk_document
 
-    pages = ["Page header\n" + f"Topic {i} explains normalization. " * 10 + "\nPage footer"
-             for i in range(3)]
+    pages = ["Page header\nCourse title\n" + f"Topic {i} explains normalization. " * 10
+             + "\nContact details\nPage footer" for i in range(3)]
     response = extract(client, mixed_pdf(pages))
     assert response.status_code == 200
     result = ExtractionResult.model_validate(response.json())
@@ -204,6 +204,60 @@ def test_repeated_margins_preserve_useful_page_bodies(client: TestClient) -> Non
         original = result.spans[chunk.position - 1].text
         assert original[chunk.start_offset:chunk.end_offset] == chunk.text
         assert "Page header" in chunk.text and "Page footer" in chunk.text
+
+@pytest.mark.parametrize("image_cover", [False, True])
+@pytest.mark.parametrize("lines", [
+    ["Page header", "Course title", "Department name", "Contact details", "Page footer"],
+    ["Shared body fact."],
+])
+def test_repeated_boundary_blocks_alone_are_not_chunkable(client, image_cover, lines):
+    """Repeated boundary text, including ambiguous short bodies, is not evidence."""
+    from uuid import uuid4
+    from app.schemas.document import ExtractionResult
+    from app.services.chunking import chunk_document
+    from app.services.rag_errors import RagError
+
+    page = "\n".join(lines)
+    response = extract(client, mixed_pdf([page] * 8, image_pages_first=image_cover))
+    assert response.status_code == 200
+    result = ExtractionResult.model_validate(response.json())
+    assert result.status == "OCR_REQUIRED"
+    assert result.quality.ocr_suspected_units == ([1] if image_cover else [])
+    assert result.spans[int(image_cover)].text == page
+    assert ("OCR_REQUIRED" if image_cover else "NO_USABLE_TEXT") in result.warnings
+    with pytest.raises(RagError, match="RAG_OCR_REQUIRED"):
+        chunk_document(uuid4(), result)
+
+
+@pytest.mark.parametrize("image_cover", [False, True])
+@pytest.mark.parametrize("repetitions", [1, 7])
+def test_repeated_interior_body_counts_towards_usefulness(client, image_cover, repetitions):
+    """Keep repeated interior text for eligibility, OCR classification and chunking."""
+    from uuid import uuid4
+    from app.schemas.document import ExtractionResult
+    from app.services.chunking import chunk_document
+    from app.services.rag_errors import RagError
+
+    pages = ["\n".join([f"Topic {i}"] + ["Shared body fact."] * repetitions + [f"End {i}"])
+             for i in range(2)]
+    response = extract(client, mixed_pdf(pages, image_pages_first=image_cover))
+    assert response.status_code == 200
+    result = ExtractionResult.model_validate(response.json())
+    expected = "EXTRACTED" if not image_cover else "PARTIAL" if repetitions == 7 else "OCR_REQUIRED"
+    assert result.status == expected
+    assert result.quality.ocr_suspected_units == ([1] if image_cover else [])
+    assert [span.text for span in result.spans[int(image_cover):]] == pages
+    if expected == "OCR_REQUIRED":
+        with pytest.raises(RagError, match="RAG_OCR_REQUIRED"):
+            chunk_document(uuid4(), result)
+    else:
+        chunks = chunk_document(uuid4(), result)
+        assert {chunk.position for chunk in chunks} == {1 + int(image_cover), 2 + int(image_cover)}
+        for chunk in chunks:
+            original = result.spans[chunk.position - 1].text
+            assert original[chunk.start_offset:chunk.end_offset] == chunk.text
+            assert chunk.text.count("Shared body fact.") == repetitions
+
 
 def test_fully_texted_pdf_has_clean_quality(client):
     result = extract(client, pdf_bytes()).json()
