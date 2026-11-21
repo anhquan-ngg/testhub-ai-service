@@ -163,6 +163,8 @@ def extract(path: Path, source_type: str, include_notes: bool) -> ExtractionResu
                 image_units.add(number)
     elif source_type == "PPTX":
         from pptx import Presentation
+        from pptx.opc.constants import RELATIONSHIP_TYPE as RT
+        from pptx.oxml import parse_xml
         from pptx.shapes.picture import Picture
         from pptx.slide import Slide
         presentation = Presentation(checked_pptx(data))
@@ -189,8 +191,24 @@ def extract(path: Path, source_type: str, include_notes: bool) -> ExtractionResu
         def background_has_image(slide: Slide) -> bool:
             for owner in (slide, slide.slide_layout, slide.slide_layout.slide_master):
                 background = owner._element.cSld.bg
-                if background is not None:
-                    return bool(background.xpath(".//a:blip"))
+                if background is None:
+                    continue
+                if background.bgPr is not None:
+                    return bool(background.bgPr.xpath(".//a:blip"))
+                reference = background.bgRef
+                if reference is None:
+                    return False
+                index = int(reference.get("idx", "0"))
+                if index in (0, 1000):
+                    return False
+                # Style references are one-based; background styles start at 1001.
+                theme = slide.slide_layout.slide_master.part.part_related_by(RT.THEME)
+                root = parse_xml(theme.blob)
+                styles = root.xpath("./a:themeElements/a:fmtScheme/" + (
+                    "a:bgFillStyleLst/*" if index >= 1001 else "a:fillStyleLst/*"
+                ))
+                offset = index - 1001 if index >= 1001 else index - 1
+                return 0 <= offset < len(styles) and bool(styles[offset].xpath(".//a:blip"))
             return False
 
         for number, slide in enumerate(presentation.slides, 1):

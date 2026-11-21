@@ -87,8 +87,8 @@ def _comparable(text: str) -> tuple[str, list[tuple[int, int]]]:
     return "".join(chars), origins
 
 
-def locate_quote(quote: str, text: str) -> str | None:
-    """Return the exact source span matching a quote despite whitespace/Unicode form drift."""
+def locate_quote(quote: str, text: str) -> tuple[int, int] | None:
+    """Return source offsets for the selected complete whitespace/Unicode-normalized match."""
     needle = _comparable(quote)[0].strip()
     if not needle:
         return None
@@ -100,7 +100,7 @@ def locate_quote(quote: str, text: str) -> str | None:
         if not ((start > 0 and origins[start - 1] == origins[start]) or (
             end + 1 < len(origins) and origins[end + 1] == origins[end]
         )):
-            return text[origins[start][0]:origins[end][1]]
+            return origins[start][0], origins[end][1]
         start = haystack.find(needle, start + 1)
     return None
 
@@ -113,12 +113,11 @@ def checked_citations(raw: list[RawCitation], chunks: dict[UUID, RetrievedChunk]
         if chunk is None:
             logger.warning("generation_invalid_output reason=unknown_chunk mode=%s slot=%s", mode, slot)
             raise InvalidQuestionsError("Unsupported citation evidence")
-        quote = locate_quote(citation.quote, chunk.text)
-        if not quote or len(quote) > 600:
+        match = locate_quote(citation.quote, chunk.text)
+        if match is None or match[1] - match[0] > 600:
             logger.warning("generation_invalid_output reason=quote_mismatch mode=%s slot=%s", mode, slot)
             raise InvalidQuestionsError("Unsupported citation evidence")
-        start = chunk.text.index(quote)
-        end = start + len(quote)
+        start, end = match
         if citation.chunk_id in spans:
             previous_start, previous_end = spans[citation.chunk_id]
             start, end = min(start, previous_start), max(end, previous_end)

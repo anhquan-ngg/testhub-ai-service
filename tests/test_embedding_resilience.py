@@ -106,6 +106,87 @@ def test_exhausted_or_oversized_hint_fails_fast_as_retryable_rate_limit(monkeypa
     assert (error.code, error.status, error.retryable) == ("RAG_EMBEDDING_RATE_LIMITED", 503, True)
     assert len(calls) == 1 and fake.sleeps == []
 
+@pytest.mark.parametrize("failure,expected_sends", [
+    ("breaker", 0), ("limiter", 0), ("config", 1), ("invalid", 1),
+    ("timeout", 1), ("transport", 3), ("rate_limit", 3),
+])
+def test_failed_call_logs_actual_sends(monkeypatch, caplog, failure, expected_sends):
+    caplog.set_level("INFO", logger="app.services.embedding")
+    fake = FakeTime()
+    responses = {
+        "config": [httpx.Response(403, json={"error": {"code": 403}})],
+        "invalid": [httpx.Response(200, json={"embeddings": []})],
+        "rate_limit": [rate_limited() for _ in range(3)],
+    }
+    calls = install(monkeypatch, responses.get(failure, []))
+
+    async def go():
+        p = provider(fake, max_attempts=3, max_rpm=1 if failure == "limiter" else None)
+        if failure == "breaker":
+            p._quota_open_until = fake.now + 300
+        if failure == "limiter":
+            p.limiter.charge(1)
+        if failure in {"timeout", "transport"}:
+            async def fail(texts, task):
+                if failure == "timeout":
+                    raise httpx.ReadTimeout("PRIVATE-SOURCE")
+                raise httpx.ConnectError("PRIVATE-SOURCE")
+            monkeypatch.setattr(p, "_send", fail)
+        try:
+            with pytest.raises(RagError):
+                await p.embed(["PRIVATE-SOURCE"], "RETRIEVAL_QUERY")
+            assert p.stats["api_requests"] == expected_sends
+        finally:
+            await p.aclose()
+
+    run(go)
+    summaries = [record.getMessage() for record in caplog.records
+                 if record.getMessage().startswith("embedding_call ")]
+    assert len(summaries) == 1
+    assert f"attempts={expected_sends} " in summaries[0]
+    assert "PRIVATE-SOURCE" not in caplog.text
+    if failure not in {"timeout", "transport"}:
+        assert len(calls) == expected_sends
+
+
+def test_overlapping_failed_calls_log_only_their_own_sends(monkeypatch, caplog):
+    caplog.set_level("INFO", logger="app.services.embedding")
+    fake = FakeTime()
+    install(monkeypatch, [rate_limited(), rate_limited()])
+
+    async def go():
+        p = provider(fake, max_attempts=1, cache_size=0)
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = p._send
+
+        async def controlled(texts, task):
+            if texts == ["first"]:
+                entered.set()
+                await release.wait()
+            return await original(texts, task)
+
+        monkeypatch.setattr(p, "_send", controlled)
+        first = asyncio.create_task(p.embed(["first"], "RETRIEVAL_QUERY"))
+        try:
+            await entered.wait()
+            with pytest.raises(RagError):
+                await p.embed(["second"], "RETRIEVAL_QUERY")
+            release.set()
+            with pytest.raises(RagError):
+                await first
+            assert p.stats["api_requests"] == 2
+        finally:
+            release.set()
+            await asyncio.gather(first, return_exceptions=True)
+            await p.aclose()
+
+    run(go)
+    summaries = [record.getMessage() for record in caplog.records
+                 if record.getMessage().startswith("embedding_call ")]
+    assert len(summaries) == 2
+    assert all("attempts=1 " in summary for summary in summaries)
+
+
 def test_attempts_exhausted(monkeypatch):
     fake = FakeTime(); calls = install(monkeypatch, [rate_limited() for _ in range(9)])
     async def go():
@@ -205,24 +286,43 @@ def test_limiter_refuses_to_wait_past_budget_and_shares_429_pause():
     assert fake.sleeps == [4.0]
 
 def test_concurrency_cap(monkeypatch):
+    fake = FakeTime()
+    calls = install(monkeypatch, [])
     active = peak = 0
-    original = GoogleEmbeddingProvider._send
-    async def slow(self, texts, task):
-        nonlocal active, peak
-        active += 1; peak = max(peak, active)
-        await asyncio.sleep(0.01)
-        active -= 1
-        return await original(self, texts, task)
-    install(monkeypatch, [])
-    monkeypatch.setattr(GoogleEmbeddingProvider, "_send", slow)
+
     async def go():
-        p = GoogleEmbeddingProvider("fixture-key", max_concurrency=2, cache_size=0)
+        p = provider(fake, max_concurrency=2, cache_size=0)
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = p._send
+
+        async def controlled(texts, task):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            if active == 2:
+                entered.set()
+            try:
+                await release.wait()
+                return await original(texts, task)
+            finally:
+                active -= 1
+
+        monkeypatch.setattr(p, "_send", controlled)
+        jobs = [asyncio.create_task(p.embed([f"t{i}"], "RETRIEVAL_QUERY")) for i in range(6)]
         try:
-            await asyncio.gather(*(p.embed([f"t{i}"], "RETRIEVAL_QUERY") for i in range(6)))
+            await asyncio.sleep(0)  # Let every job reach admission, without advancing time.
+            assert entered.is_set() and active == 2
+            assert p.stats["api_requests"] == 2
+            fake.now += 0.25
+            release.set()
+            await asyncio.gather(*jobs)
         finally:
+            release.set()
+            await asyncio.gather(*jobs, return_exceptions=True)
             await p.aclose()
+
     run(go)
-    assert peak == 2
+    assert peak == 2 and active == 0 and len(calls) == 6
 
 def test_embedding_settings_bounds_and_env(monkeypatch):
     monkeypatch.setenv("EMBEDDING_MAX_RPM", "30")
@@ -359,7 +459,8 @@ def test_rpm_timestamp_is_send_time_not_semaphore_queue_time(monkeypatch):
 
 
 @pytest.mark.parametrize("after_send", [False, True])
-def test_cancellation_usage_distinguishes_unsent_from_ambiguous(monkeypatch, after_send):
+def test_cancellation_usage_distinguishes_unsent_from_ambiguous(monkeypatch, caplog, after_send):
+    caplog.set_level("INFO", logger="app.services.embedding")
     fake = FakeTime(); calls = install(monkeypatch, [])
     async def go():
         p = provider(fake, max_concurrency=1)
@@ -388,7 +489,10 @@ def test_cancellation_usage_distinguishes_unsent_from_ambiguous(monkeypatch, aft
             await p.aclose()
     run(go)
     assert not calls
-
+    summaries = [record.getMessage() for record in caplog.records
+                 if record.getMessage().startswith("embedding_call ")]
+    assert len(summaries) == 1
+    assert f"attempts={int(after_send)} outcome=cancelled" in summaries[0]
 
 @pytest.mark.parametrize("response", [rate_limited(), httpx.Response(503, json={"error": {"code": 503}})])
 def test_exhausted_sent_call_never_becomes_refundable(monkeypatch, response):

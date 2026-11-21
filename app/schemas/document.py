@@ -58,12 +58,14 @@ class ExtractionResult(BaseModel):
             raise ValueError("Invalid source kind")
         if sum(len(s.text) for s in self.spans) > MAX_TEXT_CHARS:
             raise ValueError("Text exceeds limit")
-        if self.status == "EXTRACTED" and not any(s.text.strip() for s in self.spans):
+        if self.status in ("EXTRACTED", "PARTIAL") and not any(s.text.strip() for s in self.spans):
             raise ValueError("Empty extraction cannot succeed")
         if self.quality is not None:
             positions = self.quality.ocr_suspected_units + self.quality.blank_units
+            # Notes provide usable text but are not page/slide text units.
+            text_units = sum(bool(s.text.strip()) for s in self.spans if s.kind == base_kind)
             if (self.quality.total_units != self.unit_count
-                or self.quality.text_units > self.unit_count
+                or self.quality.text_units != text_units
                 or len(set(positions)) != len(positions)
                 or any(not 1 <= position <= self.unit_count for position in positions)):
                 raise ValueError("Invalid extraction quality positions")

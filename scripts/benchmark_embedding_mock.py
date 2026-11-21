@@ -2,20 +2,23 @@
 
 No network, no API key, no paid calls. The "server" is an httpx.MockTransport that counts embedded
 items in a sliding 60 s window and answers 429 RESOURCE_EXHAUSTED + RetryInfo when the limit is
-exceeded. Time is scaled (SCALE real seconds per simulated second) so latencies are simulated and
-approximate (+/- ~0.3 s from the OS timer). Numbers describe this model only, not real Gemini quota.
+exceeded. A shared virtual event loop advances only when all runnable work is blocked, to the
+next scheduled event. Concurrent jobs, server latency, backoff and deadlines use the same clock;
+no host sleeps or wall-clock measurements affect results. Retry jitter is fixed at its midpoint.
+Numbers model mock quota, not Gemini. Run with CPython 3.12 (the service's target runtime).
 
 Usage: .venv\\Scripts\\python scripts\\benchmark_embedding_mock.py
 """
 import asyncio
+import heapq
 import json
 import logging
 import math
 import statistics
 import sys
-import time
 from collections import deque
 from pathlib import Path
+from unittest.mock import patch
 
 import httpx
 from google import genai
@@ -26,26 +29,48 @@ from app.services import embedding as embedding_module  # noqa: E402
 from app.services.embedding import GoogleEmbeddingProvider  # noqa: E402
 from app.services.rag_errors import RagError  # noqa: E402
 
-SCALE = 0.05               # real seconds per simulated second
 SERVER_ITEMS_PER_MIN = 100  # assumed mock limit; real quota is per project and not guaranteed
 SERVER_LATENCY_S = 0.25
 DUPLICATE_RATIO = 0.4      # assumed share of plan items repeating an objective+format already in the plan
 JOB_DEADLINE_S = 40        # RagService operation deadline
 
-def sim_clock() -> float:
-    return time.monotonic() / SCALE
 
-async def sim_sleep(seconds: float) -> None:
-    await asyncio.sleep(seconds * SCALE)
+class VirtualEventLoop(asyncio.SelectorEventLoop):
+    """Discrete-event scheduler for mock-only tasks, including asyncio deadlines.
+
+    Uses CPython's timer/ready queues so SDK wait_for timers share simulated time.
+    No sockets, worker threads or other external I/O may drive this loop.
+    """
+
+    def __init__(self) -> None:
+        self._now = 0.0
+        super().__init__()
+
+    def time(self) -> float:
+        return self._now
+
+    def _run_once(self) -> None:
+        # Ignore cancelled deadlines rather than advancing time to abandoned work.
+        while self._scheduled and self._scheduled[0].cancelled():
+            timer = heapq.heappop(self._scheduled)
+            timer._scheduled = False
+            self._timer_cancelled_count -= 1
+        if not self._ready:
+            if not self._scheduled:
+                raise RuntimeError("Virtual event loop has blocked work but no scheduled events")
+            self._now = max(self._now, self._scheduled[0].when())
+        super()._run_once()
+
 
 class MockGemini:
-    def __init__(self, items_per_min: int) -> None:
+    def __init__(self, items_per_min: int, scheduler: VirtualEventLoop) -> None:
+        self.scheduler = scheduler
         self.limit, self.window, self.requests, self.rejected = items_per_min, deque(), 0, 0
 
     async def handle(self, request: httpx.Request) -> httpx.Response:
-        await sim_sleep(SERVER_LATENCY_S)
+        await asyncio.sleep(SERVER_LATENCY_S)
         count = len(json.loads(request.content)["requests"])
-        now = sim_clock()
+        now = self.scheduler.time()
         while self.window and self.window[0][0] <= now - 60:
             self.window.popleft()
         self.requests += 1
@@ -57,19 +82,6 @@ class MockGemini:
                 "details": [{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": f"{retry}s"}]}})
         self.window.append((now, count))
         return httpx.Response(200, json={"embeddings": [{"values": [1.0] * 768} for _ in range(count)]})
-
-CURRENT: dict[str, MockGemini] = {}
-
-def install(server: MockGemini) -> None:
-    """Route the SDK's async client to a fresh mock server per scenario (patched once, no stacking)."""
-    CURRENT["server"] = server
-    if "original" not in CURRENT:
-        original = CURRENT["original"] = genai.Client
-        def factory(**kwargs):
-            target = CURRENT["server"]
-            kwargs["http_options"].async_client_args = {"transport": httpx.MockTransport(target.handle)}
-            return original(**kwargs)
-        embedding_module.genai.Client = factory
 
 def plan_queries(job: int, questions: int) -> list[str]:
     distinct = max(1, math.ceil(questions * (1 - DUPLICATE_RATIO)))
@@ -89,24 +101,37 @@ async def optimized_job(provider: GoogleEmbeddingProvider, queries: list[str]) -
         await provider.embed(unique[offset:offset + BATCH_SIZE], "RETRIEVAL_QUERY")
 
 async def scenario(mode: str, jobs: int, questions: int, repeat_same_plan: bool = False) -> dict:
-    server = MockGemini(SERVER_ITEMS_PER_MIN)
-    install(server)
-    if mode == "baseline":
-        provider = GoogleEmbeddingProvider("mock", max_attempts=1, cache_size=0, sleep=sim_sleep, clock=sim_clock)
-        run = baseline_job
-    else:  # "optimized" = shipped defaults from app/config.py; "tuned" = EMBEDDING_MAX_RPM set to the server limit
-        rpm = SERVER_ITEMS_PER_MIN if mode == "tuned" else 60
-        provider = GoogleEmbeddingProvider("mock", max_rpm=rpm, max_concurrency=2, max_attempts=4, max_backoff_ms=8000,
-                                           retry_budget_ms=15000, cache_size=2048, sleep=sim_sleep, clock=sim_clock)
-        run = optimized_job
+    scheduler = asyncio.get_running_loop()
+    if not isinstance(scheduler, VirtualEventLoop):
+        raise RuntimeError("Run the mock benchmark with VirtualEventLoop")
+    server = MockGemini(SERVER_ITEMS_PER_MIN, scheduler)
+    original = genai.Client
+
+    def factory(**kwargs):
+        kwargs["http_options"].async_client_args = {"transport": httpx.MockTransport(server.handle)}
+        return original(**kwargs)
+
+    with patch.object(embedding_module.genai, "Client", factory):
+        if mode == "baseline":
+            provider = GoogleEmbeddingProvider("mock", max_attempts=1, cache_size=0,
+                                               sleep=asyncio.sleep, clock=scheduler.time)
+            run = baseline_job
+        else:  # optimized = shipped defaults; tuned = RPM set to the server limit
+            rpm = SERVER_ITEMS_PER_MIN if mode == "tuned" else 60
+            provider = GoogleEmbeddingProvider(
+                "mock", max_rpm=rpm, max_concurrency=2, max_attempts=4, max_backoff_ms=8000,
+                retry_budget_ms=15000, cache_size=2048, sleep=asyncio.sleep, clock=scheduler.time,
+                wall_clock=scheduler.time, rng=lambda: 0.5,
+            )
+            run = optimized_job
     latencies, errors = [], {}
 
     async def one(job: int) -> None:
-        started = sim_clock()
+        started = scheduler.time()
         try:
             await asyncio.wait_for(run(provider, plan_queries(0 if repeat_same_plan else job, questions)),
-                                   JOB_DEADLINE_S * SCALE)
-            latencies.append(sim_clock() - started)
+                                   JOB_DEADLINE_S)
+            latencies.append(scheduler.time() - started)
         except RagError as exc:
             errors[exc.code] = errors.get(exc.code, 0) + 1
         except TimeoutError:
@@ -151,4 +176,5 @@ async def main() -> None:
         print("| " + " | ".join(str(row[h]) for h in headers) + " |")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    with asyncio.Runner(loop_factory=VirtualEventLoop) as runner:
+        runner.run(main())

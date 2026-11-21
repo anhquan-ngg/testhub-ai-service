@@ -50,10 +50,12 @@ class GroundedGeneration:
         # Validate the entire authorized scope after the paid LLM call.
         try:
             await asyncio.wait_for(self.rag.verify_scope(RetrieveRequest(**retrieval)), 5)
-        except RagError:
+        except RagError as error:
+            # The paid call completed, so even a normally transient failure is unsafe to retry.
+            error.retryable = False
             raise
         except TimeoutError:
-            raise RagError("RAG_DEADLINE", 504, True) from None
+            raise RagError("RAG_DEADLINE", 504, False) from None
         except Exception:
-            raise RagError("RAG_STORAGE_UNAVAILABLE", 503, True) from None
+            raise RagError("RAG_STORAGE_UNAVAILABLE", 503, False) from None
         return result

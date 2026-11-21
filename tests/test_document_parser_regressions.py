@@ -31,6 +31,61 @@ def partial_result(quality):
 def test_partial_quality_is_optional():
     assert partial_result(None).quality is None
 
+@pytest.mark.parametrize("status", ["EXTRACTED", "PARTIAL"])
+@pytest.mark.parametrize("quality", [None, dict(
+    total_units=3, text_units=0, ocr_suspected_units=[2], blank_units=[1, 3],
+)])
+def test_success_requires_nonblank_span_without_relying_on_quality(status, quality):
+    payload = partial_result(None).model_dump()
+    payload.update(status=status, quality=quality)
+    for span in payload["spans"]:
+        span["text"] = " \n\t"
+    with pytest.raises(ValidationError, match="Empty extraction cannot succeed"):
+        ExtractionResult.model_validate(payload)
+
+@pytest.mark.parametrize("source_type,kind", [("PDF", "PAGE"), ("PPTX", "SLIDE")])
+@pytest.mark.parametrize("text_units", [0, 2])
+def test_quality_text_units_must_match_nonblank_base_spans(source_type, kind, text_units):
+    payload = partial_result(None).model_dump()
+    payload.update(source_type=source_type, quality=dict(
+        total_units=3, text_units=text_units, ocr_suspected_units=[2], blank_units=[3],
+    ))
+    for span in payload["spans"]:
+        span["kind"] = kind
+    with pytest.raises(ValidationError, match="Invalid extraction quality"):
+        ExtractionResult.model_validate(payload)
+
+@pytest.mark.parametrize("status", ["EXTRACTED", "PARTIAL"])
+@pytest.mark.parametrize("text_units", [0, 1])
+def test_notes_are_usable_text_but_not_quality_text_units(status, text_units):
+    payload = dict(
+        source_type="PPTX", source_sha256="a" * 64, parser_version="test/v1",
+        include_notes=True, status=status, unit_count=1, warnings=[],
+        spans=[dict(kind="SLIDE", position=1, text=" \t"),
+               dict(kind="NOTES", position=1, text="Speaker explanation")],
+        quality=dict(total_units=1, text_units=text_units,
+                     ocr_suspected_units=[1], blank_units=[]),
+    )
+    if text_units:
+        with pytest.raises(ValidationError, match="Invalid extraction quality"):
+            ExtractionResult.model_validate(payload)
+    else:
+        assert ExtractionResult.model_validate(payload).status == status
+
+@pytest.mark.parametrize("source_type,kind", [("PDF", "PAGE"), ("PPTX", "SLIDE")])
+def test_text_units_can_overlap_ocr_candidates(source_type, kind):
+    payload = partial_result(None).model_dump()
+    payload.update(source_type=source_type, quality=dict(
+        total_units=3, text_units=1, ocr_suspected_units=[1, 2], blank_units=[3],
+    ))
+    for span in payload["spans"]:
+        span["kind"] = kind
+        if span["position"] != 1:
+            span["text"] = " \t"
+    result = ExtractionResult.model_validate(payload)
+    assert result.quality.text_units == 1
+    assert result.quality.ocr_suspected_units == [1, 2]
+
 
 @pytest.mark.parametrize("updates", [
     {"total_units": 2}, {"text_units": 4},
@@ -61,12 +116,14 @@ def pptx_with_background(*, inherited=False, text=""):
              else slide.slide_layout if inherited else slide)
     _, relationship = owner.part.get_or_add_image_part(image)
     bg = owner._element.cSld.get_or_add_bg()
+    if bg.bgRef is not None:
+        bg.remove(bg.bgRef)
     fill = OxmlElement("a:blipFill")
     blip = OxmlElement("a:blip")
     from pptx.oxml.ns import qn
     blip.set(qn("r:embed"), relationship)
     fill.append(blip)
-    bg.append(fill)
+    bg.get_or_add_bgPr().append(fill)
     if text:
         slide.shapes.add_textbox(0, 0, 1000000, 1000000).text = text
     output = io.BytesIO()
@@ -84,6 +141,75 @@ def test_pptx_background_images_are_ocr_candidates(tmp_path, inherited, text):
     assert result.quality.ocr_suspected_units == ([] if text else [1])
     assert result.quality.blank_units == []
 
+
+def pptx_with_theme_background(*, inherited=False, index=1001):
+    from lxml import etree
+    from pptx.opc.constants import RELATIONSHIP_TYPE as RT
+    from pptx.oxml import parse_xml
+    from pptx.oxml.ns import qn
+
+    presentation = Presentation(io.BytesIO(pptx_with_background(inherited=inherited)))
+    slide = presentation.slides[0]
+    owner = (slide.slide_layout.slide_master if inherited == "master"
+             else slide.slide_layout if inherited else slide)
+    bg = owner._element.cSld.bg
+    fill = bg.bgPr[0]
+    blip = fill.find(qn("a:blip"))
+    image_part = owner.part.related_part(blip.get(qn("r:embed")))
+    theme = slide.slide_layout.slide_master.part.part_related_by(RT.THEME)
+    blip.set(qn("r:embed"), theme.relate_to(image_part, RT.IMAGE))
+    root = parse_xml(theme.blob)
+    styles = root.xpath("./a:themeElements/a:fmtScheme/" + (
+        "a:bgFillStyleLst" if index >= 1001 else "a:fillStyleLst"
+    ))[0]
+    styles.replace(styles[index - 1001 if index >= 1001 else index - 1], fill)
+    theme._blob = etree.tostring(root)
+    bg.remove(bg.bgPr)
+    reference = OxmlElement("p:bgRef")
+    reference.set("idx", str(index))
+    color = OxmlElement("a:schemeClr")
+    color.set("val", "accent1")
+    reference.append(color)
+    bg.append(reference)
+    output = io.BytesIO()
+    presentation.save(output)
+    return output.getvalue()
+
+@pytest.mark.parametrize("inherited", [False, True, "master"])
+@pytest.mark.parametrize("index", [1, 1001, 1003])
+def test_theme_background_images_are_ocr_candidates(tmp_path, inherited, index):
+    source = tmp_path / "theme-background.pptx"
+    source.write_bytes(pptx_with_theme_background(inherited=inherited, index=index))
+    result = extract(source, "PPTX", False)
+    assert result.status == "OCR_REQUIRED"
+    assert result.quality.ocr_suspected_units == [1]
+    assert result.quality.blank_units == []
+
+@pytest.mark.parametrize("inherited,override", [
+    (True, "slide"), ("master", "slide"), ("master", "layout"),
+])
+def test_local_solid_background_overrides_theme_image(tmp_path, inherited, override):
+    presentation = Presentation(io.BytesIO(pptx_with_theme_background(inherited=inherited)))
+    slide = presentation.slides[0]
+    owner = slide if override == "slide" else slide.slide_layout
+    owner.background.fill.solid()
+    source = tmp_path / "solid-over-theme.pptx"
+    presentation.save(source)
+    result = extract(source, "PPTX", False)
+    assert result.quality.ocr_suspected_units == []
+    assert result.quality.blank_units == [1]
+
+@pytest.mark.parametrize("index", [0, 1000, 1002, 999, 1004])
+def test_theme_reference_does_not_scan_other_or_absent_fill_styles(tmp_path, index):
+    from pptx.oxml.ns import qn
+
+    presentation = Presentation(io.BytesIO(pptx_with_theme_background()))
+    presentation.slides[0]._element.cSld.bg.find(qn("p:bgRef")).set("idx", str(index))
+    source = tmp_path / "nonimage-theme-reference.pptx"
+    presentation.save(source)
+    result = extract(source, "PPTX", False)
+    assert result.quality.ocr_suspected_units == []
+    assert result.quality.blank_units == [1]
 
 def test_blank_pptx_stays_blank(tmp_path):
     presentation = Presentation()
@@ -244,11 +370,17 @@ class DelayedChild:
 
 
 @pytest.mark.parametrize("cancel_close", [False, True])
-def test_shutdown_owns_delayed_spawn_and_reap(monkeypatch, cancel_close):
+@pytest.mark.parametrize("kill_error", [False, True])
+def test_shutdown_owns_delayed_spawn_and_reap(monkeypatch, cancel_close, kill_error):
     from app.services import document_parser
     spawn_started, spawn_release = threading.Event(), threading.Event()
     child = DelayedChild()
     folders = []
+    if kill_error:
+        def failed_kill():
+            child.killed = True
+            raise PermissionError("synthetic kill failure")
+        monkeypatch.setattr(child, "kill", failed_kill)
 
     async def unsupported(*args, **kwargs):
         raise NotImplementedError
@@ -316,10 +448,16 @@ def test_shutdown_owns_delayed_spawn_and_reap(monkeypatch, cancel_close):
 
 
 @pytest.mark.parametrize("threaded", [False, True])
-def test_repeated_request_cancellation_retains_wait_ownership(monkeypatch, threaded):
+@pytest.mark.parametrize("kill_error", [False, True])
+def test_repeated_request_cancellation_retains_wait_ownership(monkeypatch, threaded, kill_error):
     from app.services import document_parser
     child = DelayedChild()
     folders = []
+    if kill_error:
+        def failed_kill():
+            child.killed = True
+            raise OSError("synthetic kill failure")
+        monkeypatch.setattr(child, "kill", failed_kill)
 
     class NativeChild:
         @property
@@ -367,6 +505,7 @@ def test_repeated_request_cancellation_retains_wait_ownership(monkeypatch, threa
             closing.cancel()
             await asyncio.gather(closing, return_exceptions=True)
             assert parser._slots._value == 0 and folders[0].exists()
+            assert parser._cleanup_tasks
             assert all(not task.done() for task in parser._cleanup_tasks)
             child.exited.set()
             await asyncio.wait_for(parser.aclose(), 2)

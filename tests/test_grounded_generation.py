@@ -139,6 +139,25 @@ def test_citation_merge_preserves_distinct_chunks_and_rejects_excessive_span(cap
     assert 'FIRST' not in caplog.text and 'LAST' not in caplog.text
 
 
+def test_citation_merge_keeps_selected_occurrence_after_combining_cluster():
+    """Do not rematch a valid quote inside an earlier partial combining cluster."""
+    from app.schemas.grounded_generation import RawCitation
+    from app.schemas.rag import RetrievedChunk
+    from app.services.chunking import chunk_document
+    from app.services.question_generator import checked_citations
+
+    chunk = chunk_document(uuid4(), source("b\na\u0301 / b\na END"))[0]
+    evidence = RetrievedChunk(
+        **chunk.model_dump(), index_id=uuid4(), document_id=uuid4(),
+        version_id=uuid4(), source_sha256="a" * 64, similarity=1.,
+    )
+    result = checked_citations([
+        RawCitation(chunk_id=evidence.chunk_id, quote="b a"),
+        RawCitation(chunk_id=evidence.chunk_id, quote="END"),
+    ], {evidence.chunk_id: evidence}, slot=1, mode="planned")
+    assert result[0].quote == "b\na END"
+
+
 def test_cancellation_releases_shared_generation_slot(context):
     _,provider,_,_,body,_,_=context
     async def run():
@@ -191,7 +210,7 @@ def test_post_llm_scope_check_sanitizes_failure_and_has_own_deadline(context, mo
     monkeypatch.setattr(asyncio, "wait_for", bounded)
     response = client.post("/internal/rag/generate", headers=headers, json=body)
     assert response.status_code == status
-    assert response.json() == {"detail": {"code": code, "retryable": True}}
+    assert response.json() == {"detail": {"code": code, "retryable": False}}
     assert "PRIVATE" not in response.text
     assert provider.calls == 1
 
@@ -254,9 +273,7 @@ def test_locate_quote(quote,text,expected):
         text=unicodedata.normalize("NFD",text[7:])
         expected=unicodedata.normalize("NFD",expected[7:])
     result=locate_quote(quote,text)
-    assert result==expected
-    if result is not None:
-        assert result in text
+    assert (text[slice(*result)] if result is not None else None)==expected
 
 def test_outer_deadline_is_configurable(context):
     client,provider,_,_,body,_,generator=context

@@ -79,6 +79,9 @@ class DocumentParser:
                 process.kill()
             except ProcessLookupError:
                 pass
+            except OSError as exc:
+                # A failed kill does not transfer ownership or prove the child exited.
+                logger.warning("document_kill_failed error_type=%s", type(exc).__name__)
         # Executor futures survive cancellation of every task at loop shutdown.
         if isinstance(process, ThreadedProcess):
             wait = asyncio.get_running_loop().run_in_executor(None, process._process.wait)

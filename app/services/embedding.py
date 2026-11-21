@@ -43,6 +43,12 @@ class EmbeddingUsage:
 
     upstream_started: bool = True
 
+@dataclass
+class _RequestProgress:
+    """Invocation-local send evidence retained on failure and cancellation."""
+
+    sends: int = 0
+
 class EmbeddingProvider(Protocol):
     async def embed(self, texts: list[str], task: Task) -> list[list[float]]: ...
     async def aclose(self) -> None: ...
@@ -215,10 +221,11 @@ class GoogleEmbeddingProvider:
         self.stats["items"] += len(texts)
         self.stats["cache_hits"] += hits
         self.stats["deduplicated"] += len(texts) - unique
-        outcome, attempts = "ok" if pending else "cached", 0
+        outcome = "ok" if pending else "cached"
+        progress = _RequestProgress()
         try:
             if pending:
-                vectors, attempts = await self._request(list(pending.values()), task, usage)
+                vectors, _ = await self._request(list(pending.values()), task, usage, progress=progress)
                 for key, vector in zip(pending, vectors, strict=True):
                     found[key] = self._cache_put(key, vector)
             return [list(found[key]) for key in keys]
@@ -232,12 +239,17 @@ class GoogleEmbeddingProvider:
         finally:
             logger.info(
                 "embedding_call task=%s items=%s unique=%s cache_hits=%s api_items=%s attempts=%s outcome=%s latency_ms=%s",
-                task, len(texts), unique, hits, len(pending), attempts, outcome,
+                task, len(texts), unique, hits, len(pending), progress.sends, outcome,
                 round((self._clock() - started) * 1000),
             )
 
-    async def _request(self, texts: list[str], task: Task, usage: EmbeddingUsage | None = None) -> tuple[list[list[float]], int]:
+    async def _request(
+        self, texts: list[str], task: Task, usage: EmbeddingUsage | None = None,
+        *, progress: _RequestProgress | None = None,
+    ) -> tuple[list[list[float]], int]:
         """Charge at send under concurrency admission; recheck shared state after waits."""
+        if progress is None:
+            progress = _RequestProgress()
         slept, attempt = 0.0, 0
         while True:
             if self._clock() < self._quota_open_until:
@@ -258,6 +270,7 @@ class GoogleEmbeddingProvider:
                             if usage is not None:
                                 # Never refund once a send may have reached the provider, even on retry/cancel.
                                 usage.upstream_started = True
+                            progress.sends += 1
                             response = await self._send(texts, task)
                             break
                     finally:

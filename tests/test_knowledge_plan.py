@@ -234,6 +234,34 @@ def test_refusal_rejects_untrusted_or_out_of_request_slot_metadata(planned, monk
     assert 'private-provider-output' not in caplog.text+response.text
 
 
+@pytest.mark.parametrize("after_model", [False, True])
+@pytest.mark.parametrize("typed_error", [False, True])
+def test_planned_storage_retry_is_only_safe_before_model(planned, after_model, typed_error):
+    """A scope storage failure after generate_planned must not authorize another paid call."""
+    from app.services.rag_errors import RagError
+
+    client, provider, repo, _, body, headers = planned
+
+    async def broken_scope(*args):
+        if typed_error:
+            raise RagError("RAG_STORAGE_UNAVAILABLE", 503, True)
+        raise RuntimeError("PRIVATE storage details")
+
+    async def break_scope():
+        repo.validate_scope = broken_scope
+
+    if after_model:
+        provider.callback = break_scope
+    else:
+        repo.validate_scope = broken_scope
+    response = client.post('/internal/rag/generate', headers=headers, json=body)
+    assert response.status_code == 503
+    assert response.json() == {"detail": {
+        "code": "RAG_STORAGE_UNAVAILABLE", "retryable": not after_model,
+    }}
+    assert provider.calls == int(after_model)
+
+
 def test_each_cell_uses_own_sources_and_server_assigns_plan_ids(planned):
     client,provider,_,_,body,headers=planned
     result=client.post('/internal/rag/generate',headers=headers,json=body)
