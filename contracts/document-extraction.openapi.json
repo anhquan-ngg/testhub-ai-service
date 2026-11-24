@@ -41,6 +41,32 @@
               "default": false,
               "title": "Include Notes"
             }
+          },
+          {
+            "name": "ocr_mode",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "off",
+                "targeted"
+              ],
+              "type": "string",
+              "default": "off",
+              "title": "Ocr Mode"
+            }
+          },
+          {
+            "name": "ocr_positions",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 180,
+              "pattern": "^([1-9][0-9]*(,[1-9][0-9]*)*)?$",
+              "default": "",
+              "title": "Ocr Positions"
+            }
           }
         ],
         "responses": {
@@ -118,6 +144,30 @@
             "type": "array",
             "maxItems": 500,
             "title": "Blank Units"
+          },
+          "ocr_units": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "maxItems": 500,
+            "title": "Ocr Units"
+          },
+          "ocr_candidate_units": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "maxItems": 500,
+            "title": "Ocr Candidate Units"
+          },
+          "ocr_pages": {
+            "items": {
+              "$ref": "#/components/schemas/OcrPage"
+            },
+            "type": "array",
+            "maxItems": 500,
+            "title": "Ocr Pages"
           }
         },
         "additionalProperties": false,
@@ -225,6 +275,58 @@
           "warnings"
         ],
         "title": "ExtractionResult"
+      },
+      "OcrPage": {
+        "properties": {
+          "position": {
+            "type": "integer",
+            "maximum": 500.0,
+            "minimum": 1.0,
+            "title": "Position"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PENDING",
+              "COMPLETED",
+              "NO_TEXT",
+              "FAILED",
+              "BUDGET_EXHAUSTED",
+              "DISABLED"
+            ],
+            "title": "Status"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "PAGE_LIMIT",
+                  "TIME_BUDGET",
+                  "DAILY_LIMIT",
+                  "PROVIDER_ERROR",
+                  "RENDER_FAILED",
+                  "NO_ADDITIONAL_TEXT",
+                  "OCR_DISABLED",
+                  "CACHE_UNAVAILABLE",
+                  "TEXT_LIMIT"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "position",
+          "status"
+        ],
+        "title": "OcrPage",
+        "description": "Observable OCR outcome; a nonempty text layer does not imply OCR completion."
       },
       "SourceSpan": {
         "properties": {

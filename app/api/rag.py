@@ -1,4 +1,4 @@
-"""Authenticated internal RAG commands; NestJS owns authorization and queueing."""
+﻿"""Authenticated internal RAG commands; NestJS owns authorization and queueing."""
 
 import asyncio
 import logging
@@ -12,7 +12,7 @@ from app.services.rag_errors import RagError
 from app.services.retrieval import RagService
 from app.services.grounded_generation import GroundedGeneration
 from app.schemas.grounded_generation import GroundedGenerateRequest, GroundedGenerateResponse
-from app.schemas.knowledge_plan import OutlineRequest, OutlineResponse
+from app.schemas.knowledge_plan import (EvidenceCheckRequest, EvidenceCheckResponse, OutlineRequest, OutlineResponse)
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +77,32 @@ async def outline(input: OutlineRequest, service: RagService = Depends(get_rag))
     finally:
         service.slots.release()
 
+
+@router.post("/evidence-check", response_model=EvidenceCheckResponse)
+async def evidence_check(input: EvidenceCheckRequest, service: RagService = Depends(get_rag)) -> EvidenceCheckResponse:
+    """Measure retrievable text per reviewed plan item before approval, without a provider call."""
+    from app.services.content_map import check_evidence
+    service.require_profile(input.profile_id)
+    try:
+        await asyncio.wait_for(service.slots.acquire(), .1)
+    except TimeoutError:
+        raise RagError("RAG_CAPACITY_REACHED", 503, True) from None
+    try:
+        async with asyncio.timeout(15):
+            chunks = await service.repository.outline_chunks(input.owner_id, input.profile_id, input.index_id)
+            items = await asyncio.to_thread(check_evidence, chunks, input.items,
+                                            input.ocr_candidate_units, input.ocr_pages)
+            await service.repository.validate_scope(input.owner_id, input.profile_id, [input.index_id])
+            return EvidenceCheckResponse(index_id=input.index_id, items=items)
+    except RagError:
+        raise
+    except TimeoutError:
+        raise RagError("RAG_DEADLINE", 504, True) from None
+    except Exception as exc:
+        logger.warning("rag_evidence_check_failed exception_type=%s", type(exc).__name__)
+        raise RagError("RAG_STORAGE_UNAVAILABLE", 503, True) from None
+    finally:
+        service.slots.release()
 
 @router.get("/profile", response_model=IndexProfile)
 async def profile(service: RagService = Depends(get_rag)) -> IndexProfile:

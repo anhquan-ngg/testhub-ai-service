@@ -259,6 +259,133 @@
         ]
       }
     },
+    "/internal/rag/evidence-check": {
+      "post": {
+        "tags": [
+          "rag"
+        ],
+        "summary": "Evidence Check",
+        "description": "Measure retrievable text per reviewed plan item before approval, without a provider call.",
+        "operationId": "evidence_check_internal_rag_evidence_check_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EvidenceCheckRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvidenceCheckResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Internal token missing or invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Authorized source scope unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "Request body intake timed out",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Profile, index or lease conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Actual request body byte limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid input, source or insufficient context",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Invalid provider output or provider configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Capacity, authentication configuration, storage or provider unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "RAG or generation deadline exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "InternalToken": []
+          }
+        ]
+      }
+    },
     "/internal/rag/profile": {
       "get": {
         "tags": [
@@ -880,6 +1007,189 @@
   },
   "components": {
     "schemas": {
+      "EvidenceCheckItem": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Id"
+          },
+          "source_units": {
+            "items": {
+              "$ref": "#/components/schemas/SourceUnit"
+            },
+            "type": "array",
+            "maxItems": 1000,
+            "minItems": 1,
+            "title": "Source Units"
+          },
+          "question_type": {
+            "type": "string",
+            "enum": [
+              "SINGLE_CHOICE",
+              "MULTIPLE_CHOICE"
+            ],
+            "title": "Question Type",
+            "default": "SINGLE_CHOICE"
+          },
+          "question_format": {
+            "type": "string",
+            "enum": [
+              "KNOWLEDGE",
+              "UNDERSTANDING",
+              "APPLYING",
+              "ADVANCED"
+            ],
+            "title": "Question Format",
+            "default": "KNOWLEDGE"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "source_units"
+        ],
+        "title": "EvidenceCheckItem"
+      },
+      "EvidenceCheckRequest": {
+        "properties": {
+          "owner_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Owner Id"
+          },
+          "index_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Index Id"
+          },
+          "profile_id": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Profile Id"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceCheckItem"
+            },
+            "type": "array",
+            "maxItems": 200,
+            "minItems": 1,
+            "title": "Items"
+          },
+          "ocr_candidate_units": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "maxItems": 500,
+            "title": "Ocr Candidate Units"
+          },
+          "ocr_pages": {
+            "items": {
+              "$ref": "#/components/schemas/OcrPage"
+            },
+            "type": "array",
+            "maxItems": 500,
+            "title": "Ocr Pages"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "owner_id",
+          "index_id",
+          "profile_id",
+          "items"
+        ],
+        "title": "EvidenceCheckRequest"
+      },
+      "EvidenceCheckResponse": {
+        "properties": {
+          "contract_version": {
+            "type": "string",
+            "const": "knowledge-evidence-check.v1",
+            "title": "Contract Version",
+            "default": "knowledge-evidence-check.v1"
+          },
+          "index_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Index Id"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceCheckResult"
+            },
+            "type": "array",
+            "maxItems": 200,
+            "title": "Items"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "index_id",
+          "items"
+        ],
+        "title": "EvidenceCheckResponse"
+      },
+      "EvidenceCheckResult": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Id"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "OK",
+              "THIN_TEXT",
+              "NO_TEXT",
+              "TITLE_ONLY",
+              "OCR_INCOMPLETE",
+              "INSUFFICIENT_DEPTH",
+              "SOURCE_MISSING"
+            ],
+            "title": "Status"
+          },
+          "body_chars": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Body Chars"
+          },
+          "unit_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Unit Count"
+          },
+          "substantive_chars": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Substantive Chars"
+          },
+          "fact_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Fact Count"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "status",
+          "body_chars",
+          "unit_count",
+          "substantive_chars",
+          "fact_count"
+        ],
+        "title": "EvidenceCheckResult"
+      },
       "EvidenceDiagnostics": {
         "properties": {
           "issues": {
@@ -952,6 +1262,30 @@
             "type": "array",
             "maxItems": 500,
             "title": "Blank Units"
+          },
+          "ocr_units": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "maxItems": 500,
+            "title": "Ocr Units"
+          },
+          "ocr_candidate_units": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "maxItems": 500,
+            "title": "Ocr Candidate Units"
+          },
+          "ocr_pages": {
+            "items": {
+              "$ref": "#/components/schemas/OcrPage"
+            },
+            "type": "array",
+            "maxItems": 500,
+            "title": "Ocr Pages"
           }
         },
         "additionalProperties": false,
@@ -1421,6 +1755,58 @@
           "version_id"
         ],
         "title": "IndexScope"
+      },
+      "OcrPage": {
+        "properties": {
+          "position": {
+            "type": "integer",
+            "maximum": 500.0,
+            "minimum": 1.0,
+            "title": "Position"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PENDING",
+              "COMPLETED",
+              "NO_TEXT",
+              "FAILED",
+              "BUDGET_EXHAUSTED",
+              "DISABLED"
+            ],
+            "title": "Status"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "PAGE_LIMIT",
+                  "TIME_BUDGET",
+                  "DAILY_LIMIT",
+                  "PROVIDER_ERROR",
+                  "RENDER_FAILED",
+                  "NO_ADDITIONAL_TEXT",
+                  "OCR_DISABLED",
+                  "CACHE_UNAVAILABLE",
+                  "TEXT_LIMIT"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "position",
+          "status"
+        ],
+        "title": "OcrPage",
+        "description": "Observable OCR outcome; a nonempty text layer does not imply OCR completion."
       },
       "OutlineNode": {
         "properties": {

@@ -60,3 +60,25 @@ def test_shutdown_closes_all_resources_and_preserves_first_error(monkeypatch, fi
         assert events == order
 
     asyncio.run(run())
+
+
+def _ocr_state(**overrides):
+    settings = Settings(**overrides)
+    app = create_app(settings)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            parser = app.state.document_parser
+            return parser.ocr, parser.ocr_render, parser.timeout_seconds
+
+    return asyncio.run(run())
+
+
+def test_lifespan_wires_ocr_only_when_enabled():
+    ocr, render, timeout = _ocr_state(
+        internal_api_token="t" * 32, ocr_enabled=True, ocr_model="vision-x",
+        router_base_url="http://router.test/v1", router_api_key="k", ocr_max_pages=7, ocr_dpi=110,
+    )
+    assert ocr is not None and render == (7, 110, 4_000_000) and timeout >= 50
+    ocr, render, timeout = _ocr_state(internal_api_token="t" * 32)
+    assert ocr is None and render is None

@@ -1,4 +1,4 @@
-"""Full-source planning and per-cell evidence boundaries, without paid providers."""
+﻿"""Full-source planning and per-cell evidence boundaries, without paid providers."""
 import asyncio
 import json
 from unittest.mock import AsyncMock
@@ -162,6 +162,78 @@ def test_outline_endpoint_returns_merged_topic_with_all_source_units():
         repository.outline_chunks.assert_awaited_once_with(req.scope.owner_id,req.profile_id,req.index_id)
 
 
+def test_evidence_check_endpoint_flags_toc_only_and_substantive_items():
+    req=command()
+    document=extracted(['3.2. Web API\n3.2.1. Entity Framework',
+                        'RESTful API exposes resources through HTTP verbs and status codes. '
+                        'An HTTP GET request returns a representation without changing the stored resource.'])
+    chunks=[{**c.model_dump(),'document_id':req.scope.document_id,'version_id':req.scope.version_id,'source_sha256':'a'*64} for c in chunk_document(req.index_id,document)]
+    repository=AsyncMock()
+    repository.outline_chunks.return_value=chunks
+    unit=lambda position:{'kind':'PAGE','position':position}
+    with TestClient(create_app(Settings(internal_api_token='outline-fixture'))) as client:
+        client.app.state.rag=RagService(repository,Embedding())
+        response=client.post('/internal/rag/evidence-check',headers={'X-Internal-Token':'outline-fixture'},json={
+            'owner_id':str(req.scope.owner_id),'index_id':str(req.index_id),'profile_id':req.profile_id,
+            'items':[{'id':'toc','source_units':[unit(1)]},{'id':'body','source_units':[unit(2)]},
+                     {'id':'missing','source_units':[unit(9)]}]})
+        assert response.status_code==200,response.text
+        result={item['id']:item for item in response.json()['items']}
+        assert result['toc']['status']=='NO_TEXT' and result['body']['status']=='OK'
+        assert result['missing']['status']=='SOURCE_MISSING' and result['missing']['unit_count']==0
+
+@pytest.mark.parametrize('kind,level,expected', [
+    ('SINGLE_CHOICE', 'KNOWLEDGE', 'OK'),
+    ('MULTIPLE_CHOICE', 'KNOWLEDGE', 'INSUFFICIENT_DEPTH'),
+    ('SINGLE_CHOICE', 'APPLYING', 'INSUFFICIENT_DEPTH'),
+])
+def test_local_evidence_considers_type_level_and_deduplicates_facts(kind, level, expected):
+    from app.schemas.knowledge_plan import EvidenceCheckItem
+    from app.services.content_map import check_evidence
+    req = command()
+    text = ('An access token is a credential that allows the client to request a protected '
+            'resource until its expiration time. ')
+    chunks = [{**c.model_dump(), 'document_id': req.scope.document_id,
+               'version_id': req.scope.version_id, 'source_sha256': 'a' * 64}
+              for c in chunk_document(req.index_id, extracted([text * 8]))]
+    item = EvidenceCheckItem(id='row', source_units=[{'kind': 'PAGE', 'position': 1}],
+                             question_type=kind, question_format=level)
+    result = check_evidence(chunks, [item])[0]
+    assert result['status'] == expected and result['fact_count'] == 1
+
+
+def test_local_evidence_rejects_many_headings_and_tracks_only_selected_ocr():
+    from app.schemas.document import OcrPage
+    from app.schemas.knowledge_plan import EvidenceCheckItem
+    from app.services.content_map import check_evidence
+    req = command()
+    body = ('1. A parameterized query prevents user input from changing the SQL command structure.\n'
+            '2. The database driver stores the values separately from the executable statement.\n'
+            '3. The server must validate the input type and length before executing the database query.\n'
+            '4. An allowlist provides safe choices when the application supports dynamic column names.')
+    titles = '\n'.join(f'{i}. Unsafe management interfaces and privacy problems' for i in range(1, 30))
+    chunks = [{**c.model_dump(), 'document_id': req.scope.document_id,
+               'version_id': req.scope.version_id, 'source_sha256': 'a' * 64}
+              for c in chunk_document(req.index_id, extracted([titles, body]))]
+    items = [EvidenceCheckItem(id=str(p), source_units=[{'kind': 'PAGE', 'position': p}],
+                              question_type='MULTIPLE_CHOICE', question_format='APPLYING') for p in (1, 2)]
+    result = check_evidence(chunks, items, [1, 2], [OcrPage(position=1, status='PENDING'),
+                                                   OcrPage(position=2, status='COMPLETED')])
+    assert [item['status'] for item in result] == ['OCR_INCOMPLETE', 'OK']
+    assert check_evidence(chunks, items)[0]['status'] in {'TITLE_ONLY', 'NO_TEXT'}
+    assert result[1]['fact_count'] == 4
+
+
+def test_local_evidence_joins_wrapped_prose_without_merging_heading_lists():
+    from app.services.content_map import substantive_facts
+    prose = ('An access token is a credential that allows\n'
+             'the client to request a protected resource until its expiration time.\n'
+             'The server must validate the token before\n'
+             'returning the protected data to the requesting application.')
+    assert len(substantive_facts(prose)) == 2
+    assert substantive_facts('Management interfaces\nprivacy problems\nsoftware components') == set()
+    assert substantive_facts('Software is a service\n\nexternal components') == set()
+
 class Provider:
     def __init__(self):self.calls=0;self.borrow=False;self.callback=None;self.wrong_answers=False
     async def generate_grounded(self,prompt):
@@ -170,6 +242,8 @@ class Provider:
         for i,slot in enumerate(slots):
             chunk=slots[0 if self.borrow else i]['excerpts'][0]
             assert slot['index']==i+1 and slot['option_count']==4
+            assert 'cognitive_level' not in slot and slot['cognitive_task'].split(':')[0] in ('Recall','Understand','Apply','Analyze/evaluate')
+            assert 'cognitive_task' in prompt and 'unsupported_slots' in prompt
             correct=slot['correct_option_count']
             assert correct== (1 if slot['question_type']=='SINGLE_CHOICE' else 2)
             assert correct+slot['incorrect_option_count']==4

@@ -67,6 +67,22 @@ def create_app(
                 app.state.rag = RagService(rag_repository, embedding)
             except Exception:
                 logger.warning("rag_initialization_unavailable")
+        ocr_client = None
+        if config.ocr_enabled:
+            try:
+                from app.services.ocr import OcrClient, OcrService
+                ocr_cache = None
+                if config.ocr_persistent_cache_enabled and rag_repository is not None:
+                    from app.repositories.ocr_cache import RepositoryOcrCache
+                    ocr_cache = RepositoryOcrCache(rag_repository, config.ocr_cache_ttl_days)
+                ocr_client = OcrClient(config)
+                document_parser.ocr = OcrService(config, ocr_client, ocr_cache)
+                document_parser.ocr_render = (config.ocr_max_pages, config.ocr_dpi, config.ocr_max_image_bytes)
+                document_parser.ocr_budget_seconds = config.ocr_time_budget_ms / 1000
+                # Stay under the backend's 55 s document timeout while leaving room for OCR.
+                document_parser.timeout_seconds = max(document_parser.timeout_seconds, 50)
+            except Exception:
+                logger.warning("ocr_initialization_unavailable")
         provider = None
         if config.llm_provider == "9router" or config.gemini_api_key:
             try:
@@ -89,6 +105,8 @@ def create_app(
         finally:
             cleanup_error: BaseException | None = None
             resources = [(document_parser.aclose, False)]
+            if ocr_client is not None:
+                resources.append((ocr_client.aclose, False))
             if embedding is not None:
                 resources.append((embedding.aclose, False))
             if rag_repository is not None:

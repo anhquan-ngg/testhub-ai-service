@@ -178,6 +178,23 @@ class VectorRepository:
             cursor = await db.execute(
                 "DELETE FROM rag.embedding_cache WHERE created_at <= now() - make_interval(days => %s)", (ttl_days,))
             return cursor.rowcount
+    async def ocr_cache_get_many(self, keys: list[str], ttl_days: int) -> dict[str, str]:
+        """Return unexpired OCR transcripts by sha256 key; callers treat any error as a miss."""
+        async with self.pool.connection() as db:
+            rows = await (await db.execute(
+                """SELECT cache_key, transcript FROM rag.ocr_page_cache
+                   WHERE cache_key = ANY(%s) AND created_at > now() - make_interval(days => %s)""",
+                (keys, ttl_days))).fetchall()
+        return {row["cache_key"]: row["transcript"] for row in rows}
+
+    async def ocr_cache_put_many(self, items: dict[str, str]) -> None:
+        async with self.pool.connection() as db:
+            async with db.cursor() as cursor:
+                await cursor.executemany(
+                    """INSERT INTO rag.ocr_page_cache(cache_key, transcript) VALUES (%s, %s)
+                       ON CONFLICT (cache_key) DO UPDATE SET transcript = EXCLUDED.transcript, created_at = now()""",
+                    list(items.items()))
+
     async def outline_chunks(self, owner: UUID, profile: str, index_id: UUID) -> list[dict]:
         """Read the full authorized chunk manifest, not an eight-chunk retrieval sample."""
         await self.validate_scope(owner, profile, [index_id])

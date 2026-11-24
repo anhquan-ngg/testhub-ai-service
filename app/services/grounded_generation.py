@@ -3,7 +3,8 @@ import asyncio
 import json
 from app.providers.base import ProviderTimeoutError
 from app.schemas.grounded_generation import GroundedGenerateRequest, GroundedGenerateResponse
-from app.services.prompt_builder import ANSWER_INSTRUCTIONS, CITATION_INSTRUCTIONS, EVIDENCE_OUTCOME_INSTRUCTIONS, blueprint_json
+from app.services.prompt_builder import (ANSWER_INSTRUCTIONS, CITATION_INSTRUCTIONS, COGNITIVE_INSTRUCTIONS,
+                                         EVIDENCE_OUTCOME_INSTRUCTIONS, blueprint_json)
 from app.services.question_generator import QuestionGenerator
 from app.services.retrieval import RagService
 from app.services.rag_errors import RagError
@@ -20,7 +21,7 @@ def grounded_prompt(request: GroundedGenerateRequest, context: list[dict]) -> st
         f"Count: {len(slots)}. Return the questions in exactly this order; every item fixes "
         f"the question_type and cognitive level (question_format): {blueprint_json(slots)}. "
         "Each question has four distinct options. "
-        + ANSWER_INSTRUCTIONS + CITATION_INSTRUCTIONS + EVIDENCE_OUTCOME_INSTRUCTIONS +
+        + ANSWER_INSTRUCTIONS + COGNITIVE_INSTRUCTIONS + CITATION_INSTRUCTIONS + EVIDENCE_OUTCOME_INSTRUCTIONS +
         "Reference JSON follows:\n" + json.dumps({"query":request.query,"excerpts":context},ensure_ascii=False)
     )
 

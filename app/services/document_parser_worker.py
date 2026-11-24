@@ -1,6 +1,7 @@
-"""Disposable parser process. No network, DB, provider calls or source logging."""
+﻿"""Disposable parser process. No network, DB, provider calls or source logging."""
 
 from collections import Counter
+from dataclasses import dataclass
 import hashlib
 from importlib.metadata import version
 import io
@@ -11,17 +12,22 @@ import sys
 import zipfile
 import zlib
 from pathlib import Path
+from typing import Any, TYPE_CHECKING
 
 from app.schemas.document import (
     ExtractionQuality, ExtractionResult, MAX_FILE_BYTES, MAX_RESULT_BYTES, MAX_TEXT_CHARS,
-    MAX_UNITS, SourceSpan,
+    MAX_UNITS, OcrPage, SourceSpan,
 )
 
+
+if TYPE_CHECKING:
+    from PIL import Image
 
 # Header/footer-only text is not evidence of a usable source.
 MIN_USEFUL_CHARS = 200
 MIN_USEFUL_UNITS = 2
 MAX_MARGIN_LINE_CHARS = 100
+PARSER_RULES = "text/v4"
 
 
 def _content_without_repeated_margins(spans: list[SourceSpan]) -> list[str]:
@@ -45,8 +51,111 @@ def _content_without_repeated_margins(spans: list[SourceSpan]) -> list[str]:
     return content
 
 
+# A page with images and fewer non-space characters than this may hide its content in pictures.
+OCR_THIN_CHARS = 150
+OCR_MIN_IMAGE_SIDE = 96
+OCR_MAX_IMAGES_PER_SLIDE = 4
+OCR_MAX_SIDE = 2000
+OCR_MAX_PIXELS = 40_000_000
+OCR_MANIFEST = "ocr-manifest.json"
+
 class DocumentRejected(Exception):
     """Only an allowlisted error code may cross the process boundary."""
+
+@dataclass(frozen=True)
+class OcrRender:
+    """Where and how candidate page images are written for the network-enabled parent."""
+    directory: Path
+    max_pages: int
+    dpi: int
+    max_image_bytes: int
+    positions: tuple[int, ...] = ()
+
+def _encode_image(image: "Image.Image", max_bytes: int) -> bytes | None:
+    """Downscale and encode as PNG, falling back to JPEG, until the file fits the byte cap."""
+    from PIL import Image
+    image = image.convert("RGB")
+    scale = min(1.0, OCR_MAX_SIDE / max(image.size))
+    for _ in range(4):
+        size = (max(1, int(image.width * scale)), max(1, int(image.height * scale)))
+        resized = image if size == image.size else image.resize(size, Image.LANCZOS)
+        for fmt, options in (("PNG", {"optimize": True}), ("JPEG", {"quality": 85})):
+            buffer = io.BytesIO()
+            resized.save(buffer, fmt, **options)
+            if buffer.tell() <= max_bytes:
+                return buffer.getvalue()
+        scale *= 0.7
+    return None
+
+def _write_candidates(render: OcrRender, candidates: dict[int, list[bytes]]) -> None:
+    """Persist encoded images plus a manifest outside the bounded JSON result."""
+    render.directory.mkdir(parents=True, exist_ok=True)
+    pages = []
+    for position, blobs in sorted(candidates.items()):
+        names = []
+        for index, blob in enumerate(blobs):
+            name = f"ocr-{position}-{index}.img"
+            (render.directory / name).write_bytes(blob)
+            names.append(name)
+        pages.append({"position": position, "images": names})
+    (render.directory / OCR_MANIFEST).write_text(json.dumps({"pages": pages}), encoding="utf-8")
+
+def _render_pdf_pages(data: bytes, positions: list[int], render: OcrRender) -> dict[int, list[bytes]]:
+    """Rasterize only the selected pages; a page that fails to render is simply skipped."""
+    import pypdfium2 as pdfium
+    result: dict[int, list[bytes]] = {}
+    document = pdfium.PdfDocument(data)
+    try:
+        for position in positions:
+            page = document[position - 1]
+            try:
+                width, height = page.get_size()
+                scale = min(render.dpi / 72, OCR_MAX_SIDE / max(width, height, 1))
+                if width * height * scale * scale > OCR_MAX_PIXELS:
+                    continue
+                encoded = _encode_image(page.render(scale=scale).to_pil(), render.max_image_bytes)
+                if encoded:
+                    result[position] = [encoded]
+            except Exception:
+                continue
+            finally:
+                page.close()
+    finally:
+        document.close()
+    return result
+
+def _slide_images(shapes: object, render: OcrRender) -> list[bytes]:
+    """Re-encode the largest embedded pictures of one slide, ignoring icons and bad formats."""
+    from PIL import Image
+    from pptx.shapes.picture import Picture
+    found: list[tuple[int, "Image.Image"]] = []
+
+    def visit(items: object) -> None:
+        for shape in items:
+            if shape.shape_type == 6:
+                visit(shape.shapes)
+            elif isinstance(shape, Picture):
+                try:
+                    image = Image.open(io.BytesIO(shape.image.blob))
+                    width, height = image.size
+                    if (min(width, height) < OCR_MIN_IMAGE_SIDE or width * height > OCR_MAX_PIXELS):
+                        continue
+                    image.load()
+                    found.append((width * height, image))
+                except Exception:
+                    continue
+
+    visit(shapes)
+    found.sort(key=lambda item: item[0], reverse=True)
+    blobs = []
+    for _, image in found[:OCR_MAX_IMAGES_PER_SLIDE]:
+        try:
+            encoded = _encode_image(image, render.max_image_bytes)
+        except Exception:
+            continue
+        if encoded:
+            blobs.append(encoded)
+    return blobs
 
 
 ZIP_EXPANSION_LIMIT = 100 * 1024 * 1024
@@ -127,13 +236,15 @@ def checked_pptx(data: bytes) -> io.BytesIO:
     return target
 
 
-def extract(path: Path, source_type: str, include_notes: bool) -> ExtractionResult:
-    """Preserve page/slide identities without rendering or executing embedded data."""
+def extract(path: Path, source_type: str, include_notes: bool,
+            ocr_render: OcrRender | None = None) -> ExtractionResult:
+    """Preserve page/slide identities; render images only for thin pages when asked."""
     data = path.read_bytes()
     if not data or len(data) > MAX_FILE_BYTES:
         raise DocumentRejected("DOCUMENT_LIMIT_EXCEEDED")
     spans: list[SourceSpan] = []
     image_units: set[int] = set()
+    slide_map: dict[int, Any] = {}
     chars = 0
 
     def add(kind: str, position: int, text: str) -> None:
@@ -214,6 +325,7 @@ def extract(path: Path, source_type: str, include_notes: bool) -> ExtractionResu
         for number, slide in enumerate(presentation.slides, 1):
             text = "\n".join(shape_text(slide.shapes))
             add("SLIDE", number, text)
+            slide_map[number] = slide
             if contains_image(slide.shapes) or background_has_image(slide):
                 image_units.add(number)
             if include_notes and slide.has_notes_slide:
@@ -227,6 +339,41 @@ def extract(path: Path, source_type: str, include_notes: bool) -> ExtractionResu
     content = _content_without_repeated_margins(base)
     ocr_suspected = [span.position for span, body in zip(base, content)
                      if span.position in image_units and not body.strip()]
+    ranked = sorted(
+        ((len("".join(body.split())), span.position) for span, body in zip(base, content)
+         if span.position in image_units), key=lambda item: (item[0], item[1]))
+    candidate_units = [position for size, position in ranked if size < OCR_THIN_CHARS]
+    requested = list(ocr_render.positions) if ocr_render else []
+    if any(position < 1 or position > count for position in requested):
+        raise DocumentRejected("DOCUMENT_INVALID")
+    outcomes = {position: OcrPage(position=position, status="PENDING")
+                for position in sorted(set(candidate_units + requested))}
+    if ocr_render is not None:
+        # An explicit plan request is not displaced by globally thinner, unrelated pages.
+        ordered = requested or candidate_units
+        wanted = ordered[:ocr_render.max_pages]
+        for position in ordered[ocr_render.max_pages:]:
+            outcomes[position] = OcrPage(position=position, status="BUDGET_EXHAUSTED", reason="PAGE_LIMIT")
+        candidates: dict[int, list[bytes]] = {}
+        try:
+            if source_type == "PDF" and wanted:
+                candidates = _render_pdf_pages(data, wanted, ocr_render)
+            elif source_type == "PPTX":
+                for position in wanted:
+                    blobs = _slide_images(slide_map[position].shapes, ocr_render)
+                    if blobs:
+                        candidates[position] = blobs
+            for position in wanted:
+                if position not in candidates:
+                    no_images = source_type == "PPTX" and position not in image_units
+                    outcomes[position] = OcrPage(position=position,
+                        status="NO_TEXT" if no_images else "FAILED",
+                        reason="NO_ADDITIONAL_TEXT" if no_images else "RENDER_FAILED")
+            if candidates:
+                _write_candidates(ocr_render, candidates)
+        except Exception:
+            for position in wanted:
+                outcomes[position] = OcrPage(position=position, status="FAILED", reason="RENDER_FAILED")
     blank = [span.position for span in base if not span.text and span.position not in ocr_suspected]
     useful_chars = sum(len("".join(text.split())) for text in content)
     required_units = min(MIN_USEFUL_UNITS, max(1, count - 1))
@@ -244,10 +391,12 @@ def extract(path: Path, source_type: str, include_notes: bool) -> ExtractionResu
         warnings = ["EMPTY_UNITS"] + warnings
     return ExtractionResult(
         source_type=source_type, source_sha256=hashlib.sha256(data).hexdigest(),
-        parser_version=f"{source_type.lower()}/{version('pypdf' if source_type == 'PDF' else 'python-pptx')};text/v3",
+        parser_version=f"{source_type.lower()}/{version('pypdf' if source_type == 'PDF' else 'python-pptx')};{PARSER_RULES}",
         include_notes=include_notes, unit_count=count, spans=spans, status=status, warnings=warnings,
         quality=ExtractionQuality(total_units=count, text_units=len(text_units),
-                                  ocr_suspected_units=ocr_suspected, blank_units=blank),
+                                  ocr_suspected_units=ocr_suspected, blank_units=blank,
+                                  ocr_candidate_units=sorted(candidate_units),
+                                  ocr_pages=list(outcomes.values())),
     )
 
 def main() -> None:
@@ -259,7 +408,12 @@ def main() -> None:
         resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_RESULT_BYTES,) * 2)
     output = Path(sys.argv[2])
     try:
-        result = extract(Path(sys.argv[1]), sys.argv[3], sys.argv[4] == "true")
+        render = None
+        if len(sys.argv) > 5:
+            max_pages, dpi, max_bytes = (int(value) for value in sys.argv[5].split(","))
+            positions = tuple(int(value) for value in sys.argv[6].split(",")) if len(sys.argv) > 6 else ()
+            render = OcrRender(output.parent / "ocr", max_pages, dpi, max_bytes, positions)
+        result = extract(Path(sys.argv[1]), sys.argv[3], sys.argv[4] == "true", render)
         encoded = result.model_dump_json().encode("utf-8")
         if len(encoded) > MAX_RESULT_BYTES:
             raise DocumentRejected("DOCUMENT_LIMIT_EXCEEDED")

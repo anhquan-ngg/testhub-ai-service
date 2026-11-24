@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from app.api.dependencies import require_internal_token
 from app.schemas.document import ExtractionResult
@@ -26,6 +26,8 @@ router = APIRouter(prefix="/internal/documents", tags=["documents"],
 })
 async def extract_document(
     request: Request, source_type: Literal["PDF", "PPTX"], include_notes: bool = False,
+    ocr_mode: Literal["off", "targeted"] = "off",
+    ocr_positions: str = Query(default="", max_length=180, pattern=r"^([1-9][0-9]*(,[1-9][0-9]*)*)?$"),
 ) -> ExtractionResult:
     """Receive owner-authorized bytes from NestJS and return source-positioned text."""
     if request.headers.get("content-type", "").split(";")[0] != "application/octet-stream":
@@ -33,4 +35,6 @@ async def extract_document(
     if source_type == "PDF" and include_notes:
         raise HTTPException(422, "Speaker notes are only supported for PPTX")
     parser: DocumentParser = request.app.state.document_parser
-    return await parser.extract(request.stream(), source_type, include_notes)
+    positions = tuple(int(value) for value in ocr_positions.split(",")) if ocr_positions else ()
+    return await parser.extract(request.stream(), source_type, include_notes,
+                                ocr_mode=ocr_mode, ocr_positions=positions)

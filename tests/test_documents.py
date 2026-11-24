@@ -1,4 +1,4 @@
-"""Real PDF/PPTX extraction through the production route and disposable parser."""
+﻿"""Real PDF/PPTX extraction through the production route and disposable parser."""
 
 import asyncio
 import io
@@ -37,6 +37,25 @@ def pdf_bytes(*, blank=False, encrypted=False):
     target = io.BytesIO()
     writer.write(target)
     return target.getvalue()
+
+
+@pytest.mark.parametrize('query', [
+    'ocr_mode=automatic', 'ocr_mode=targeted', 'ocr_positions=1',
+    'ocr_mode=targeted&ocr_positions=1,1', 'ocr_mode=targeted&ocr_positions=0',
+    'ocr_mode=targeted&ocr_positions=2', 'ocr_mode=targeted&ocr_positions=1,-2',
+])
+def test_extract_rejects_invalid_targeted_ocr_query(client, query):
+    response = client.post('/internal/documents/extract?source_type=PDF&' + query,
+        content=pdf_bytes(), headers={'X-Internal-Token': TOKEN, 'Content-Type': 'application/octet-stream'})
+    assert response.status_code == 422
+
+
+def test_extract_targeted_query_reports_disabled_without_vision_calls(client):
+    response = client.post('/internal/documents/extract?source_type=PDF&ocr_mode=targeted&ocr_positions=1',
+        content=pdf_bytes(), headers={'X-Internal-Token': TOKEN, 'Content-Type': 'application/octet-stream'})
+    assert response.status_code == 200, response.text
+    assert response.json()['quality']['ocr_pages'] == [
+        {'position': 1, 'status': 'DISABLED', 'reason': 'OCR_DISABLED'}]
 
 
 def pptx_bytes():
@@ -89,7 +108,7 @@ def test_empty_pdf_requires_ocr(client):
     assert result["status"] == "OCR_REQUIRED"
     # A blank source is not an OCR candidate: no image was found on any page.
     assert "NO_USABLE_TEXT" in result["warnings"] and "OCR_REQUIRED" not in result["warnings"]
-    assert result["quality"] == {"total_units": 1, "text_units": 0, "ocr_suspected_units": [], "blank_units": [1]}
+    assert result["quality"] == {"total_units": 1, "text_units": 0, "ocr_suspected_units": [], "blank_units": [1], "ocr_units": [], "ocr_candidate_units": [], "ocr_pages": []}
 
 
 def test_mixed_pdf_keeps_text_but_flags_image_only_page(client):
@@ -155,9 +174,9 @@ def test_cover_only_gap_with_substantial_text_is_partial(client):
     assert result["status"] == "PARTIAL"
     assert result["unit_count"] == 4
     assert result["spans"][0] == {"kind": "PAGE", "position": 1, "text": ""}
-    assert result["quality"] == {"total_units": 4, "text_units": 3, "ocr_suspected_units": [1], "blank_units": []}
+    assert result["quality"] == {"total_units": 4, "text_units": 3, "ocr_suspected_units": [1], "blank_units": [], "ocr_units": [], "ocr_candidate_units": [1], "ocr_pages": [{"position": 1, "status": "PENDING", "reason": None}]}
     assert result["warnings"] == ["EMPTY_UNITS", "PARTIAL_EXTRACTION"]
-    assert result["parser_version"].endswith(";text/v3")
+    assert result["parser_version"].endswith(";text/v4")
 
 def test_header_footer_sized_text_is_not_enough_for_partial(client):
     result = extract(client, mixed_pdf(["Page header", "Page footer"])).json()
@@ -261,7 +280,7 @@ def test_repeated_interior_body_counts_towards_usefulness(client, image_cover, r
 
 def test_fully_texted_pdf_has_clean_quality(client):
     result = extract(client, pdf_bytes()).json()
-    assert result["quality"] == {"total_units": 1, "text_units": 1, "ocr_suspected_units": [], "blank_units": []}
+    assert result["quality"] == {"total_units": 1, "text_units": 1, "ocr_suspected_units": [], "blank_units": [], "ocr_units": [], "ocr_candidate_units": [], "ocr_pages": []}
     assert result["warnings"] == []
 
 def test_mixed_pptx_flags_image_inside_group(client):

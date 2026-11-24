@@ -143,3 +143,34 @@ def test_fallback_and_grounded_deadline_config(monkeypatch) -> None:
     monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
     loaded = Settings.from_env()
     assert loaded.llm_fallback_provider == "gemini" and loaded.grounded_timeout_ms == 90_000
+
+
+def test_ocr_is_off_by_default_and_needs_no_router_config() -> None:
+    settings = Settings()
+    assert settings.ocr_enabled is False and settings.ocr_model == ""
+
+
+def test_ocr_requires_router_endpoint_and_model_even_with_gemini() -> None:
+    with pytest.raises(ValueError, match="OCR_MODEL"):
+        Settings(ocr_enabled=True, router_base_url="http://localhost:20128/v1", router_api_key="fixture-key")
+    with pytest.raises(ValueError, match="ROUTER_API_KEY"):
+        Settings(ocr_enabled=True, ocr_model="vision/model", router_base_url="http://localhost:20128/v1")
+
+
+def test_ocr_env_values_are_loaded(monkeypatch) -> None:
+    values = dict(OCR_ENABLED="true", OCR_MODEL="vision/model", ROUTER_BASE_URL="http://localhost:20128/v1",
+                  ROUTER_API_KEY="fixture-key", OCR_MAX_PAGES="12", OCR_MAX_CONCURRENCY="2",
+                  OCR_DAILY_PAGE_LIMIT="500", OCR_PERSISTENT_CACHE_ENABLED="true", OCR_CONFIG_VERSION="v2")
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+    settings = Settings.from_env()
+    assert settings.ocr_enabled and settings.ocr_model == "vision/model" and settings.ocr_max_pages == 12
+    assert settings.ocr_max_concurrency == 2 and settings.ocr_daily_page_limit == 500
+    assert settings.ocr_persistent_cache_enabled and settings.ocr_config_version == "v2"
+
+
+@pytest.mark.parametrize("name,value", [("OCR_MAX_PAGES", "0"), ("OCR_DPI", "600"), ("OCR_MAX_ATTEMPTS", "9")])
+def test_ocr_bounds_are_enforced(monkeypatch, name, value) -> None:
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValueError, match=name):
+        Settings.from_env()
