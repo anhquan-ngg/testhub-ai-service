@@ -32,6 +32,14 @@ class Settings:
     embedding_max_backoff_ms: int = 8_000
     embedding_retry_budget_ms: int = 15_000
     embedding_cache_size: int = 2_048
+    embedding_api_key: str = field(default="", repr=False)  # empty = reuse gemini_api_key
+    embedding_indexing_rpm_percent: int = 50  # share of EMBEDDING_MAX_RPM that indexing may use
+    embedding_indexing_max_concurrency: int = 1
+    embedding_persistent_cache_enabled: bool = False
+    embedding_persistent_cache_ttl_days: int = 30
+    embedding_daily_limit: int = 0  # 0 = off; local per-process requests/day guard
+    embedding_daily_warn_percent: int = 80
+    embedding_daily_indexing_percent: int = 80  # indexing stops here so queries keep headroom
 
     def __post_init__(self) -> None:
         if self.llm_provider not in ("gemini", "9router"):
@@ -63,8 +71,8 @@ class Settings:
                 raise ValueError("ROUTER_API_KEY must contain visible ASCII characters")
             if not self.router_model.strip() or any(ord(c) < 32 or ord(c) == 127 for c in self.router_model):
                 raise ValueError("ROUTER_MODEL must be a nonempty model ID without control characters")
-        if self.rag_enabled and (not self.rag_database_url or not self.gemini_api_key):
-            raise ValueError("RAG_ENABLED requires RAG_DATABASE_URL and GEMINI_API_KEY")
+        if self.rag_enabled and (not self.rag_database_url or not self.effective_embedding_api_key):
+            raise ValueError("RAG_ENABLED requires RAG_DATABASE_URL and EMBEDDING_GOOGLE_API_KEY or GEMINI_API_KEY")
         bounds = {
             "gemini_timeout_ms": (1, 120_000),
             "generation_timeout_ms": (1, 180_000),
@@ -81,6 +89,12 @@ class Settings:
             # Must stay well under RagService's 40s operation deadline.
             "embedding_retry_budget_ms": (0, 30_000),
             "embedding_cache_size": (0, 100_000),
+            "embedding_indexing_rpm_percent": (1, 100),
+            "embedding_indexing_max_concurrency": (1, 16),
+            "embedding_persistent_cache_ttl_days": (1, 365),
+            "embedding_daily_limit": (0, 10_000_000),
+            "embedding_daily_warn_percent": (1, 100),
+            "embedding_daily_indexing_percent": (1, 100),
         }
         for name, (minimum, maximum) in bounds.items():
             if not minimum <= getattr(self, name) <= maximum:
@@ -88,6 +102,11 @@ class Settings:
                 raise ValueError(f"{env_name} must be between {minimum} and {maximum}")
         if self.grounded_timeout_ms and self.grounded_timeout_ms < self.generation_timeout_ms + 15_000:
             raise ValueError("GROUNDED_GENERATION_TIMEOUT_MS must be at least GENERATION_TIMEOUT_MS + 15000")
+
+    @property
+    def effective_embedding_api_key(self) -> str:
+        """Dedicated embedding key (ideally from its own Google project), else the shared Gemini key."""
+        return self.embedding_api_key or self.gemini_api_key
 
     @property
     def effective_grounded_timeout_ms(self) -> int:
@@ -102,6 +121,12 @@ class Settings:
                 return int(os.getenv(name, str(default)))
             except ValueError:
                 raise ValueError(f"{name} must be an integer") from None
+
+        def flag(name: str) -> bool:
+            value = os.getenv(name, "false")
+            if value not in ("true", "false"):
+                raise ValueError(f"{name} must be true or false")
+            return value == "true"
 
         rag_flag = os.getenv("RAG_ENABLED", "false")
         if rag_flag not in ("true", "false"):
@@ -132,4 +157,12 @@ class Settings:
             embedding_max_backoff_ms=integer("EMBEDDING_MAX_BACKOFF_MS", 8_000),
             embedding_retry_budget_ms=integer("EMBEDDING_RETRY_BUDGET_MS", 15_000),
             embedding_cache_size=integer("EMBEDDING_CACHE_SIZE", 2_048),
+            embedding_api_key=os.getenv("EMBEDDING_GOOGLE_API_KEY", "").strip(),
+            embedding_indexing_rpm_percent=integer("EMBEDDING_INDEXING_RPM_PERCENT", 50),
+            embedding_indexing_max_concurrency=integer("EMBEDDING_INDEXING_MAX_CONCURRENCY", 1),
+            embedding_persistent_cache_enabled=flag("EMBEDDING_PERSISTENT_CACHE_ENABLED"),
+            embedding_persistent_cache_ttl_days=integer("EMBEDDING_PERSISTENT_CACHE_TTL_DAYS", 30),
+            embedding_daily_limit=integer("EMBEDDING_DAILY_LIMIT", 0),
+            embedding_daily_warn_percent=integer("EMBEDDING_DAILY_WARN_PERCENT", 80),
+            embedding_daily_indexing_percent=integer("EMBEDDING_DAILY_INDEXING_PERCENT", 80),
         )

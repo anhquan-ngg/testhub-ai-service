@@ -107,6 +107,14 @@ Copy the tracked [.env.example](.env.example) without overwriting an existing lo
 | `EMBEDDING_MAX_BACKOFF_MS` | `8000` | `0..30000`; a server `Retry-After`/`RetryInfo` longer than this fails fast with `RAG_EMBEDDING_RATE_LIMITED`. |
 | `EMBEDDING_RETRY_BUDGET_MS` | `15000` | `0..30000`; total wait (limiter + backoff) per embedding call, kept below the 40 s RAG deadline. |
 | `EMBEDDING_CACHE_SIZE` | `2048` | `0..100000`; in-memory LRU of vectors keyed by model/dimensions/task/text hash; `0` disables. |
+| `EMBEDDING_GOOGLE_API_KEY` | empty | Dedicated key for embeddings, ideally from a separate Google Cloud project; falls back to `GEMINI_API_KEY`. Quota is per project, so this isolates indexing from question generation (it is not a way to bypass quota). |
+| `EMBEDDING_INDEXING_RPM_PERCENT` | `50` | `1..100`; share of `EMBEDDING_MAX_RPM` indexing may use so retrieval/generation requests always fit. `100` disables the cap. Indexing also pauses 250 ms while a retrieval call is in flight, and over-budget indexing returns retryable `RAG_EMBEDDING_RATE_LIMITED`, which the backend queue retries. |
+| `EMBEDDING_INDEXING_MAX_CONCURRENCY` | `1` | `1..16`; concurrent indexing embedding calls per process; retrieval is not limited by it. |
+| `EMBEDDING_PERSISTENT_CACHE_ENABLED` | `false` | Store query embeddings (sha256 key + vector only, never text) in `rag.embedding_cache`; needs migration `003`. Fails open on any database error. |
+| `EMBEDDING_PERSISTENT_CACHE_TTL_DAYS` | `30` | `1..365`; age after which a cached query vector is ignored. |
+| `EMBEDDING_DAILY_LIMIT` | `0` | `0` disables. Local per-process daily item guard; use `floor(project RPD / replicas)` (free tier: 1000). Resets at midnight Pacific (assumed) and on restart. At the limit calls fail early with non-retryable `RAG_EMBEDDING_QUOTA_EXHAUSTED`. |
+| `EMBEDDING_DAILY_WARN_PERCENT` | `80` | `1..100`; logs `embedding_daily_budget_warning` once per day. |
+| `EMBEDDING_DAILY_INDEXING_PERCENT` | `80` | `1..100`; indexing is rejected above this share of the daily limit so queries keep headroom. |
 
 The example file supplies illustrative `http://127.0.0.1:20128/v1` and PostgreSQL URLs; these are not code defaults or proof that those services exist. Blank token/router settings and placeholder Google credentials must be configured before use.
 
@@ -161,6 +169,8 @@ psql -h 127.0.0.1 -U postgres -d testhub -v ON_ERROR_STOP=1 -f migrations\000_bo
 psql -h 127.0.0.1 -U postgres -d testhub -c '\password testhub_ai'
 psql -h 127.0.0.1 -U testhub_ai -d testhub -v ON_ERROR_STOP=1 -f migrations\001_rag.sql
 psql -h 127.0.0.1 -U testhub_ai -d testhub -v ON_ERROR_STOP=1 -f migrations\002_optional_document_chapter.sql
+# Optional: durable query-embedding cache (only with EMBEDDING_PERSISTENT_CACHE_ENABLED=true)
+psql -h 127.0.0.1 -U testhub_ai -d testhub -v ON_ERROR_STOP=1 -f migrations\003_embedding_cache.sql
 ```
 
 Migrations are manual, not startup tasks, and separate from NestJS Prisma migrations. Readiness requires both migration versions and nullable `chapter_id` for topic-owned documents. The AI role owns only technical `rag` data; do not grant it business-table access. The profile endpoint alone does not verify the database schema.

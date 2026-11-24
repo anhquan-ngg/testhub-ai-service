@@ -13,6 +13,15 @@ không thêm file này vào Git. Quy tắc này áp dụng cho mọi yêu cầu 
 - Keep the retry budget below the 40 s RAG deadline. Never change the model/dims/profile or
   rotate keys to bypass quota. Tests use MockTransport and a fake clock only
   (`tests/test_embedding_resilience.py`; mock benchmark in `scripts/benchmark_embedding_mock.py`).
+- Indexing (`RETRIEVAL_DOCUMENT`) is capped to `EMBEDDING_INDEXING_RPM_PERCENT` of the RPM window,
+  yields to in-flight queries and has its own concurrency semaphore; queries are never throttled by it.
+  Embeddings use `EMBEDDING_GOOGLE_API_KEY` (fallback `GEMINI_API_KEY`) for quota isolation only.
+- The optional L2 cache (`EMBEDDING_PERSISTENT_CACHE_ENABLED`, off by default) stores only sha256 keys
+  and query vectors in `rag.embedding_cache` (migration 003, manual); it must fail open and `ready()`
+  must not require it. Limiters are per process: divide the project RPM by replicas × workers.
+- `DailyBudget` (`EMBEDDING_DAILY_LIMIT`, 0 = off) counts items actually sent, rejects before the send with
+  `RAG_EMBEDDING_QUOTA_EXHAUSTED` (indexing earlier, at `EMBEDDING_DAILY_INDEXING_PERCENT`), and is closed by a
+  Google daily 429 until the next midnight-Pacific reset. It is in-memory: per process, resets on restart.
 - Report: `testhub/docs/ai-question-generation-embedding-audit.md`.
 
 ## Grounded evidence refusals

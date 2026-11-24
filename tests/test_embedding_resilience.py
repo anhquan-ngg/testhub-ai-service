@@ -447,7 +447,7 @@ def test_rpm_timestamp_is_send_time_not_semaphore_queue_time(monkeypatch):
             fake.now += 61
             p._slots.release()
             await queued
-            assert list(p.limiter._window) == [(1061.0, 1)]
+            assert list(p.limiter._window) == [(1061.0, 1, False)]
             usage = EmbeddingUsage()
             with pytest.raises(RagError, match="RAG_EMBEDDING_RATE_LIMITED"):
                 await p.embed(["second"], "RETRIEVAL_QUERY", usage=usage)
@@ -635,3 +635,271 @@ def test_repeated_breaker_claims_refund_only_the_reservation_not_prior_sends(mon
             await p.aclose()
     run(go)
     assert len(calls) == 2
+
+
+class FakeStore:
+    def __init__(self, data=None, fail=False):
+        self.data, self.fail, self.gets, self.puts = dict(data or {}), fail, 0, 0
+    async def get_many(self, keys):
+        self.gets += 1
+        if self.fail:
+            raise RuntimeError("relation rag.embedding_cache does not exist")
+        return {key: self.data[key] for key in keys if key in self.data}
+    async def put_many(self, items):
+        self.puts += 1
+        if self.fail:
+            raise RuntimeError("down")
+        self.data.update(items)
+
+def docs(count, prefix="doc"):
+    return [f"{prefix}-{i}" for i in range(count)]
+
+def test_indexing_is_capped_to_share_while_queries_still_fit(monkeypatch):
+    fake = FakeTime(); calls = install(monkeypatch, [])
+    async def go():
+        p = provider(fake, max_rpm=60, indexing_rpm_share=0.5)
+        try:
+            assert p.limiter.background_cap == 30
+            await p.embed(docs(16, "a"), "RETRIEVAL_DOCUMENT")
+            with pytest.raises(RagError) as error:
+                await p.embed(docs(16, "b"), "RETRIEVAL_DOCUMENT")
+            assert (error.value.code, error.value.retryable) == ("RAG_EMBEDDING_RATE_LIMITED", True)
+            assert len(await p.embed(["interactive"], "RETRIEVAL_QUERY")) == 1
+            return p.limiter._used
+        finally:
+            await p.aclose()
+    assert run(go) == 17 and len(calls) == 2
+
+def test_indexing_cap_is_released_when_window_expires(monkeypatch):
+    fake = FakeTime(); install(monkeypatch, [])
+    async def go():
+        p = provider(fake, max_rpm=60, indexing_rpm_share=0.5, retry_budget_ms=120_000)
+        try:
+            await p.embed(docs(16, "a"), "RETRIEVAL_DOCUMENT")
+            await p.embed(docs(16, "b"), "RETRIEVAL_DOCUMENT")
+            return p.limiter._background_used
+        finally:
+            await p.aclose()
+    assert run(go) == 16 and sum(fake.sleeps) >= 59
+
+def test_full_share_disables_indexing_cap():
+    limiter = RateLimiter(60, clock=lambda: 0.0, sleep=None, background_share=1.0)
+    assert limiter.background_cap is None
+    assert RateLimiter(None, clock=lambda: 0.0, sleep=None, background_share=0.5).background_cap is None
+
+def test_indexing_yields_while_a_query_is_in_flight(monkeypatch):
+    fake = FakeTime(); calls = install(monkeypatch, [])
+    async def go():
+        p = provider(fake, max_rpm=600, indexing_rpm_share=0.5)
+        original = fake.sleep
+        async def sleep(seconds):
+            p._interactive = 0
+            await original(seconds)
+        p._sleep = sleep
+        p._interactive = 1
+        try:
+            await p.embed(docs(2), "RETRIEVAL_DOCUMENT")
+            return p.stats["indexing_yields"]
+        finally:
+            await p.aclose()
+    assert run(go) == 1 and len(calls) == 1 and fake.sleeps == [0.25]
+
+def test_queries_never_yield_to_indexing(monkeypatch):
+    fake = FakeTime(); install(monkeypatch, [])
+    async def go():
+        p = provider(fake, max_rpm=600, indexing_rpm_share=0.5)
+        p._interactive = 5
+        try:
+            await p.embed(["q"], "RETRIEVAL_QUERY")
+            return p.stats["indexing_yields"]
+        finally:
+            await p.aclose()
+    assert run(go) == 0 and fake.sleeps == []
+
+def test_indexing_concurrency_slot_does_not_block_queries(monkeypatch):
+    fake = FakeTime(); calls = install(monkeypatch, [])
+    async def go():
+        p = provider(fake, indexing_max_concurrency=1)
+        try:
+            await p._indexing_slots.acquire()
+            indexing = asyncio.create_task(p.embed(docs(2), "RETRIEVAL_DOCUMENT"))
+            await asyncio.sleep(0)
+            assert await p.embed(["q"], "RETRIEVAL_QUERY") and not indexing.done() and len(calls) == 1
+            p._indexing_slots.release()
+            await indexing
+        finally:
+            await p.aclose()
+    run(go)
+    assert len(calls) == 2
+    assert provider(FakeTime())._indexing_slots is None
+
+def test_persistent_cache_serves_queries_and_fills_l1(monkeypatch):
+    fake = FakeTime(); calls = install(monkeypatch, [])
+    key = GoogleEmbeddingProvider._key("RETRIEVAL_QUERY", "LIFO")
+    store = FakeStore({key: [0.5] * 768})
+    async def go():
+        p = provider(fake); p.attach_persistent_cache(store)
+        try:
+            first = await p.embed(["LIFO"], "RETRIEVAL_QUERY")
+            again = await p.embed(["LIFO"], "RETRIEVAL_QUERY")
+            return first, again, p.stats
+        finally:
+            await p.aclose()
+    first, again, stats = run(go)
+    assert calls == [] and first == again and stats["persistent_hits"] == 1 and store.gets == 1
+
+def test_persistent_cache_miss_writes_new_query_vectors(monkeypatch):
+    fake = FakeTime(); calls = install(monkeypatch, [])
+    async def go():
+        p = provider(fake); store = FakeStore(); p.attach_persistent_cache(store)
+        try:
+            await p.embed(["LIFO", "FIFO"], "RETRIEVAL_QUERY")
+            return store
+        finally:
+            await p.aclose()
+    store = run(go)
+    assert len(calls) == 1 and len(store.data) == 2 and store.puts == 1
+    assert all(len(key) == 64 and "LIFO" not in key for key in store.data)
+
+def test_persistent_cache_is_query_only(monkeypatch):
+    fake = FakeTime(); install(monkeypatch, [])
+    async def go():
+        p = provider(fake); store = FakeStore(); p.attach_persistent_cache(store)
+        try:
+            await p.embed(["chunk text"], "RETRIEVAL_DOCUMENT")
+            return store
+        finally:
+            await p.aclose()
+    store = run(go)
+    assert (store.gets, store.puts, store.data) == (0, 0, {})
+
+def test_persistent_cache_failure_fails_open(monkeypatch, caplog):
+    caplog.set_level("WARNING")
+    fake = FakeTime(); calls = install(monkeypatch, [])
+    async def go():
+        p = provider(fake); p.attach_persistent_cache(FakeStore(fail=True))
+        try:
+            assert len(await p.embed(["LIFO"], "RETRIEVAL_QUERY")) == 1
+            return p.stats
+        finally:
+            await p.aclose()
+    stats = run(go)
+    assert len(calls) == 1 and stats["persistent_errors"] == 2
+    assert "embedding_persistent_cache_unavailable" in caplog.text and "LIFO" not in caplog.text
+
+def test_embedding_key_falls_back_and_indexing_settings_validate(monkeypatch):
+    base = {"llm_provider": "gemini", "gemini_api_key": "main"}
+    assert Settings(**base).effective_embedding_api_key == "main"
+    assert Settings(**base, embedding_api_key="embed").effective_embedding_api_key == "embed"
+    for name, value in [("EMBEDDING_INDEXING_RPM_PERCENT", "0"), ("EMBEDDING_INDEXING_RPM_PERCENT", "101"),
+                        ("EMBEDDING_INDEXING_MAX_CONCURRENCY", "0"), ("EMBEDDING_PERSISTENT_CACHE_ENABLED", "yes")]:
+        monkeypatch.setenv(name, value)
+        with pytest.raises(ValueError, match=name):
+            Settings.from_env()
+        monkeypatch.delenv(name)
+    monkeypatch.setenv("EMBEDDING_GOOGLE_API_KEY", "embed")
+    monkeypatch.setenv("EMBEDDING_PERSISTENT_CACHE_ENABLED", "true")
+    settings = Settings.from_env()
+    assert settings.embedding_api_key == "embed" and settings.embedding_persistent_cache_enabled
+    assert (settings.embedding_indexing_rpm_percent, settings.embedding_indexing_max_concurrency) == (50, 1)
+# 2026-01-15 12:00 UTC is 04:00 Pacific; the Pacific day rolls over 20h later.
+NOON = 1_768_478_400.0
+
+class FakeWall:
+    def __init__(self, now=NOON):
+        self.now = now
+    def __call__(self):
+        return self.now
+
+def test_daily_budget_counts_sent_items_only_and_warns_once(monkeypatch, caplog):
+    fake = FakeTime(); calls = install(monkeypatch, [])
+    async def go():
+        p = provider(fake, daily_limit=10, daily_warn_percent=50, wall_clock=FakeWall())
+        try:
+            await p.embed(["a", "b", "c"], "RETRIEVAL_QUERY")
+            await p.embed(["a", "b", "c"], "RETRIEVAL_QUERY")
+            await p.embed(["d", "e", "f"], "RETRIEVAL_QUERY")
+            return p.daily.used
+        finally:
+            await p.aclose()
+    caplog.set_level("WARNING")
+    assert run(go) == 6 and len(calls) == 2
+    assert caplog.text.count("embedding_daily_budget_warning") == 1
+
+def test_daily_budget_rejects_indexing_early_but_queries_continue(monkeypatch):
+    fake = FakeTime(); calls = install(monkeypatch, [])
+    async def go():
+        p = provider(fake, daily_limit=10, daily_indexing_percent=50, wall_clock=FakeWall())
+        try:
+            await p.embed(docs(5, "a"), "RETRIEVAL_DOCUMENT")
+            with pytest.raises(RagError) as error:
+                await p.embed(docs(1, "b"), "RETRIEVAL_DOCUMENT")
+            assert (error.value.code, error.value.retryable, error.value.status) == (
+                "RAG_EMBEDDING_QUOTA_EXHAUSTED", False, 503)
+            await p.embed(docs(5, "q"), "RETRIEVAL_QUERY")
+            with pytest.raises(RagError) as error:
+                await p.embed(["over"], "RETRIEVAL_QUERY")
+            assert error.value.code == "RAG_EMBEDDING_QUOTA_EXHAUSTED"
+            return p.stats["daily_rejected"], p.daily.used
+        finally:
+            await p.aclose()
+    assert run(go) == (2, 10) and len(calls) == 2
+
+def test_daily_budget_resets_at_pacific_midnight(monkeypatch):
+    fake = FakeTime(); install(monkeypatch, [])
+    wall = FakeWall()
+    async def go():
+        p = provider(fake, daily_limit=2, wall_clock=wall)
+        try:
+            await p.embed(["a", "b"], "RETRIEVAL_QUERY")
+            with pytest.raises(RagError):
+                await p.embed(["c"], "RETRIEVAL_QUERY")
+            assert 19 * 3600 < p.daily.seconds_until_reset() <= 20 * 3600
+            wall.now += 20 * 3600
+            await p.embed(["c"], "RETRIEVAL_QUERY")
+            return p.daily.used
+        finally:
+            await p.aclose()
+    assert run(go) == 1
+
+def test_google_daily_429_closes_local_budget_until_reset(monkeypatch):
+    daily = rate_limited([{"@type": QUOTA_FAILURE, "violations": [
+        {"quotaId": "EmbedContentRequestsPerDayPerProjectPerModel-FreeTier"}]}])
+    fake = FakeTime(); calls = install(monkeypatch, [daily])
+    wall = FakeWall()
+    async def go():
+        p = provider(fake, daily_limit=1000, wall_clock=wall)
+        try:
+            with pytest.raises(RagError):
+                await p.embed(["a"], "RETRIEVAL_QUERY")
+            fake.now += 400  # past the 5-minute breaker
+            with pytest.raises(RagError) as error:
+                await p.embed(["b"], "RETRIEVAL_QUERY")
+            assert error.value.code == "RAG_EMBEDDING_QUOTA_EXHAUSTED"
+            wall.now += 20 * 3600
+            await p.embed(["b"], "RETRIEVAL_QUERY")
+        finally:
+            await p.aclose()
+    run(go)
+    assert len(calls) == 2
+
+def test_daily_budget_off_by_default_and_settings_validate(monkeypatch):
+    fake = FakeTime(); calls = install(monkeypatch, [])
+    async def go():
+        p = provider(fake)
+        try:
+            for i in range(3):
+                await p.embed([f"q{i}"], "RETRIEVAL_QUERY")
+            return p.daily.enabled, p.daily.describe()
+        finally:
+            await p.aclose()
+    assert run(go) == (False, "off") and len(calls) == 3
+    assert Settings().embedding_daily_limit == 0
+    for name, value in [("EMBEDDING_DAILY_LIMIT", "-1"), ("EMBEDDING_DAILY_WARN_PERCENT", "0"),
+                        ("EMBEDDING_DAILY_INDEXING_PERCENT", "101")]:
+        monkeypatch.setenv(name, value)
+        with pytest.raises(ValueError, match=name):
+            Settings.from_env()
+        monkeypatch.delenv(name)
+    monkeypatch.setenv("EMBEDDING_DAILY_LIMIT", "1000")
+    assert Settings.from_env().embedding_daily_limit == 1000

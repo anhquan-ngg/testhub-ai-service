@@ -40,13 +40,18 @@ def create_app(
                 from app.services.embedding import GoogleEmbeddingProvider
                 from app.services.retrieval import RagService
                 embedding = GoogleEmbeddingProvider(
-                    config.gemini_api_key,
+                    config.effective_embedding_api_key,
                     max_rpm=config.embedding_max_rpm,
                     max_concurrency=config.embedding_max_concurrency,
                     max_attempts=config.embedding_max_attempts,
                     max_backoff_ms=config.embedding_max_backoff_ms,
                     retry_budget_ms=config.embedding_retry_budget_ms,
                     cache_size=config.embedding_cache_size,
+                    indexing_rpm_share=config.embedding_indexing_rpm_percent / 100,
+                    indexing_max_concurrency=config.embedding_indexing_max_concurrency,
+                    daily_limit=config.embedding_daily_limit,
+                    daily_warn_percent=config.embedding_daily_warn_percent,
+                    daily_indexing_percent=config.embedding_daily_indexing_percent,
                 )
                 if sys.platform == "win32":
                     from app.repositories.windows_pool import SelectorRepository
@@ -55,6 +60,10 @@ def create_app(
                 else:
                     rag_repository = VectorRepository(config.rag_database_url)
                     await rag_repository.open()
+                if config.embedding_persistent_cache_enabled:
+                    from app.repositories.embedding_cache import RepositoryEmbeddingCache
+                    embedding.attach_persistent_cache(RepositoryEmbeddingCache(
+                        rag_repository, config.embedding_persistent_cache_ttl_days))
                 app.state.rag = RagService(rag_repository, embedding)
             except Exception:
                 logger.warning("rag_initialization_unavailable")

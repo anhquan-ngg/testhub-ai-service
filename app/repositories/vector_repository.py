@@ -155,6 +155,29 @@ class VectorRepository:
                  json.dumps(source_units) if source_units is not None else None,
                  json.dumps(source_units) if source_units is not None else None, json.dumps(vector)))).fetchall()
 
+    async def cache_get_many(self, keys: list[str], ttl_days: int) -> dict[str, list[float]]:
+        """Return unexpired cached query vectors by sha256 key; callers treat any error as a miss."""
+        async with self.pool.connection() as db:
+            rows = await (await db.execute(
+                """SELECT cache_key, embedding::text AS embedding FROM rag.embedding_cache
+                   WHERE cache_key = ANY(%s) AND created_at > now() - make_interval(days => %s)""",
+                (keys, ttl_days))).fetchall()
+        return {row["cache_key"]: json.loads(row["embedding"]) for row in rows}
+
+    async def cache_put_many(self, items: dict[str, list[float]]) -> None:
+        async with self.pool.connection() as db:
+            async with db.cursor() as cursor:
+                await cursor.executemany(
+                    """INSERT INTO rag.embedding_cache(cache_key, embedding) VALUES (%s, %s::public.vector)
+                       ON CONFLICT (cache_key) DO UPDATE SET embedding = EXCLUDED.embedding, created_at = now()""",
+                    [(key, json.dumps(vector, allow_nan=False)) for key, vector in items.items()])
+
+    async def cache_prune(self, ttl_days: int) -> int:
+        """Delete expired cache rows and return how many were removed."""
+        async with self.pool.connection() as db:
+            cursor = await db.execute(
+                "DELETE FROM rag.embedding_cache WHERE created_at <= now() - make_interval(days => %s)", (ttl_days,))
+            return cursor.rowcount
     async def outline_chunks(self, owner: UUID, profile: str, index_id: UUID) -> list[dict]:
         """Read the full authorized chunk manifest, not an eight-chunk retrieval sample."""
         await self.validate_scope(owner, profile, [index_id])
