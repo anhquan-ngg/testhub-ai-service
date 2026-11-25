@@ -4,6 +4,15 @@
 tạo file local với tiêu đề và trạng thái đã xác minh trước khi đọc/cập nhật;
 không thêm file này vào Git. Quy tắc này áp dụng cho mọi yêu cầu đọc file bên dưới.
 
+## Targeted OCR Recovery And Strict Evidence
+
+- Ordinary extraction uses `ocr_mode=off`; never silently spend on vision OCR. Only explicit owner-consented recovery uses `ocr_mode=targeted` with 1..30 distinct source positions from the saved plan.
+- Keep all detected `ocr_candidate_units` and per-page `ocr_pages` outcomes. Additional text belongs to `ocr_units`; a text-bearing page is not proof of complete extraction. Preserve source bytes/hash, original page numbers, and text-layer content.
+- Page statuses are `PENDING|COMPLETED|NO_TEXT|FAILED|BUDGET_EXHAUSTED|DISABLED`; `reason` is optional/nullable. Cache exact transcription only, never diagram inference. Cache failure on read prevents paid work; successful backend checkpoints survive cache-write failures.
+- Recovery creates a new backend version with durable checkpoints and bounded deliveries. Never revive old failed question batches. No automatic unlimited provider/daily/time-budget retries; only PAGE_LIMIT continues the next bounded delivery.
+- Evidence precheck is local/no-paid, type/cognition-aware, deduplicates facts and rejects unresolved selected OCR, missing units, heading-only sources and inadequate depth. All non-OK results block backend approval; checker failure must fail closed. It is a conservative heuristic, not proof of semantic sufficiency.
+- Synchronize both exported OpenAPI contracts and BE/FE schemas when changing these fields. Offline tests must not invoke providers, mutate live data, or apply migrations.
+
 ## Embedding 429 resilience (audit)
 
 - `GoogleEmbeddingProvider` owns a per-process item limiter (`EMBEDDING_MAX_RPM`), a
@@ -13,6 +22,15 @@ không thêm file này vào Git. Quy tắc này áp dụng cho mọi yêu cầu 
 - Keep the retry budget below the 40 s RAG deadline. Never change the model/dims/profile or
   rotate keys to bypass quota. Tests use MockTransport and a fake clock only
   (`tests/test_embedding_resilience.py`; mock benchmark in `scripts/benchmark_embedding_mock.py`).
+- Indexing (`RETRIEVAL_DOCUMENT`) is capped to `EMBEDDING_INDEXING_RPM_PERCENT` of the RPM window,
+  yields to in-flight queries and has its own concurrency semaphore; queries are never throttled by it.
+  Embeddings use `EMBEDDING_GOOGLE_API_KEY` (fallback `GEMINI_API_KEY`) for quota isolation only.
+- The optional L2 cache (`EMBEDDING_PERSISTENT_CACHE_ENABLED`, off by default) stores only sha256 keys
+  and query vectors in `rag.embedding_cache` (migration 003, manual); it must fail open and `ready()`
+  must not require it. Limiters are per process: divide the project RPM by replicas × workers.
+- `DailyBudget` (`EMBEDDING_DAILY_LIMIT`, 0 = off) counts items actually sent, rejects before the send with
+  `RAG_EMBEDDING_QUOTA_EXHAUSTED` (indexing earlier, at `EMBEDDING_DAILY_INDEXING_PERCENT`), and is closed by a
+  Google daily 429 until the next midnight-Pacific reset. It is in-memory: per process, resets on restart.
 - Report: `testhub/docs/ai-question-generation-embedding-audit.md`.
 
 ## Grounded evidence refusals

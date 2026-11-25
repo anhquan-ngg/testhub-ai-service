@@ -1,4 +1,4 @@
-"""Offline regressions for parser ownership, manifests and hostile containers."""
+﻿"""Offline regressions for parser ownership, manifests and hostile containers."""
 
 import asyncio
 import io

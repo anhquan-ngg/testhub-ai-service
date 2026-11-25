@@ -8,10 +8,16 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from app.schemas.document import ExtractionResult, MAX_FILE_BYTES, MAX_RESULT_BYTES
+from app.schemas.document import ExtractionResult, MAX_FILE_BYTES, MAX_RESULT_BYTES, MAX_UNITS, OcrPage
+from app.services.document_parser_worker import OCR_MANIFEST
+
+if TYPE_CHECKING:
+    from app.services.ocr import OcrService
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +49,16 @@ class ThreadedProcess:
 
 
 class DocumentParser:
-    def __init__(self, *, timeout_seconds: float = 45, max_concurrency: int = 2) -> None:
+    def __init__(
+        self, *, timeout_seconds: float = 45, max_concurrency: int = 2,
+        ocr: "OcrService | None" = None, ocr_render: tuple[int, int, int] | None = None,
+        ocr_budget_seconds: float = 0,
+    ) -> None:
         self.timeout_seconds = timeout_seconds
+        # (max_pages, dpi, max_image_bytes) for the child; the parent transcribes what it renders.
+        self.ocr = ocr
+        self.ocr_render = ocr_render
+        self.ocr_budget_seconds = ocr_budget_seconds
         self._slots = asyncio.Semaphore(max_concurrency)
         self._cleanup_tasks: set[asyncio.Task[None]] = set()
         self._closing = False
@@ -113,8 +127,15 @@ class DocumentParser:
 
     async def extract(
         self, stream: AsyncIterator[bytes], source_type: str, include_notes: bool,
+        *, ocr_mode: str = "off", ocr_positions: tuple[int, ...] = (),
     ) -> ExtractionResult:
         """Bound request time; retain capacity for any late spawn until cleanup completes."""
+        if (ocr_mode not in {"off", "targeted"}
+                or (ocr_mode == "targeted" and not ocr_positions)
+                or (ocr_mode == "off" and ocr_positions)
+                or len(ocr_positions) > 30 or len(set(ocr_positions)) != len(ocr_positions)
+                or any(type(position) is not int or not 1 <= position <= MAX_UNITS for position in ocr_positions)):
+            raise ExtractionError("DOCUMENT_INVALID")
         if self._closing:
             raise ExtractionError("DOCUMENT_CAPACITY_REACHED", 503)
         self._active += 1
@@ -130,7 +151,7 @@ class DocumentParser:
             if self._closing:
                 raise ExtractionError("DOCUMENT_CAPACITY_REACHED", 503)
             return await asyncio.wait_for(
-                self._extract(stream, source_type, include_notes, cleanup), self.timeout_seconds,
+                self._extract(stream, source_type, include_notes, cleanup, ocr_mode, ocr_positions), self.timeout_seconds,
             )
         except TimeoutError:
             raise ExtractionError("DOCUMENT_TIMEOUT", 504) from None
@@ -148,7 +169,7 @@ class DocumentParser:
 
     async def _extract(
         self, stream: AsyncIterator[bytes], source_type: str, include_notes: bool,
-        cleanup: list[asyncio.Task[None]],
+        cleanup: list[asyncio.Task[None]], ocr_mode: str = "off", ocr_positions: tuple[int, ...] = (),
     ) -> ExtractionResult:
         folder = tempfile.TemporaryDirectory(prefix="testhub-document-")
         try:
@@ -165,7 +186,10 @@ class DocumentParser:
             args = (
                 sys.executable, "-m", "app.services.document_parser_worker",
                 str(source), str(output), source_type, str(include_notes).lower(),
+                *((",".join(map(str, self.ocr_render)), ",".join(map(str, ocr_positions)))
+                  if ocr_mode == "targeted" and self.ocr and self.ocr_render else ()),
             )
+            started = time.monotonic()
             options = {
                 "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
                 "cwd": str(Path(__file__).resolve().parents[2]),
@@ -212,9 +236,22 @@ class DocumentParser:
                     "DOCUMENT_INVALID", "DOCUMENT_ENCRYPTED", "DOCUMENT_LIMIT_EXCEEDED",
                 }:
                     raise ExtractionError(value["error"])
-                return ExtractionResult.model_validate_json(raw)
+                result = ExtractionResult.model_validate_json(raw)
             except (ValueError, TypeError):
                 raise ExtractionError("DOCUMENT_PROCESS_FAILED") from None
+            if any(position > result.unit_count for position in ocr_positions):
+                raise ExtractionError("DOCUMENT_INVALID")
+            ocr_dir = Path(folder.name) / "ocr"
+            if ocr_mode == "targeted":
+                if self.ocr is None or self.ocr_render is None:
+                    pages = {page.position: page for page in result.quality.ocr_pages}
+                    pages.update({position: OcrPage(position=position, status="DISABLED", reason="OCR_DISABLED")
+                                  for position in ocr_positions})
+                    result.quality.ocr_pages = [pages[position] for position in sorted(pages)]
+                elif (ocr_dir / OCR_MANIFEST).is_file():
+                    remaining = self.timeout_seconds - (time.monotonic() - started) - 3
+                    result = await self.ocr.enrich(result, ocr_dir, min(self.ocr_budget_seconds, remaining))
+            return result
         finally:
             if not cleanup:
                 folder.cleanup()

@@ -2,7 +2,7 @@
 
 import json
 
-from app.schemas.question import GenerateRequest, QuestionSlot, QuestionType
+from app.schemas.question import GenerateRequest, QuestionFormat, QuestionSlot, QuestionType
 
 
 def answer_requirements(question_type: QuestionType) -> dict[str, int]:
@@ -11,6 +11,24 @@ def answer_requirements(question_type: QuestionType) -> dict[str, int]:
     return {"option_count": 4, "correct_option_count": correct,
             "incorrect_option_count": 4 - correct}
 
+
+COGNITIVE_TASKS = {
+    QuestionFormat.KNOWLEDGE: "Recall: ask for a fact, definition, term or listed item stated in the excerpts.",
+    QuestionFormat.UNDERSTANDING: "Understand: ask to explain, classify, compare or paraphrase ideas stated in the excerpts.",
+    QuestionFormat.APPLYING: "Apply: pose a short concrete scenario and ask which concept, step or rule from the excerpts fits it.",
+    QuestionFormat.ADVANCED: "Analyze/evaluate: ask to compare trade-offs, find causes or judge a choice using reasoning supported by the excerpts.",
+}
+
+def cognitive_task(question_format: QuestionFormat) -> str:
+    """Describe what a cognitive level demands of the question stem and options."""
+    return COGNITIVE_TASKS[question_format]
+
+COGNITIVE_INSTRUCTIONS = (
+    "Each slot's cognitive_task defines the thinking level its question must demand; "
+    "a recall question for an APPLYING or ADVANCED slot is wrong. Distractors must stay plausible "
+    "at that level. If the excerpts cannot support that level, list the slot in unsupported_slots "
+    "instead of lowering the level. "
+)
 
 ANSWER_INSTRUCTIONS = (
     "For EACH slot, obey its option_count, correct_option_count and incorrect_option_count. "
@@ -47,6 +65,7 @@ def blueprint_json(slots: list[QuestionSlot]) -> str:
         [
             {"index": index, "question_type": slot.question_type.value,
              "question_format": slot.question_format.value,
+             "cognitive_task": cognitive_task(slot.question_format),
              **answer_requirements(slot.question_type)}
             for index, slot in enumerate(slots, start=1)
         ],

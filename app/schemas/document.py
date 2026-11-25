@@ -19,6 +19,16 @@ class SourceSpan(BaseModel):
     text: str = Field(max_length=MAX_TEXT_CHARS)
 
 
+class OcrPage(BaseModel):
+    """Observable OCR outcome; a nonempty text layer does not imply OCR completion."""
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    position: int = Field(ge=1, le=MAX_UNITS)
+    status: Literal["PENDING", "COMPLETED", "NO_TEXT", "FAILED", "BUDGET_EXHAUSTED", "DISABLED"]
+    reason: Literal["PAGE_LIMIT", "TIME_BUDGET", "DAILY_LIMIT", "PROVIDER_ERROR", "RENDER_FAILED",
+                    "NO_ADDITIONAL_TEXT", "OCR_DISABLED", "CACHE_UNAVAILABLE", "TEXT_LIMIT"] | None = None
+
+
 class ExtractionQuality(BaseModel):
     """Per-unit text classification; positions are original page/slide numbers."""
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -27,6 +37,10 @@ class ExtractionQuality(BaseModel):
     text_units: int = Field(ge=0, le=MAX_UNITS)
     ocr_suspected_units: list[int] = Field(max_length=MAX_UNITS)
     blank_units: list[int] = Field(max_length=MAX_UNITS)
+    # Units whose span text also contains a vision transcript of embedded images.
+    ocr_units: list[int] = Field(default_factory=list, max_length=MAX_UNITS)
+    ocr_candidate_units: list[int] = Field(default_factory=list, max_length=MAX_UNITS)
+    ocr_pages: list[OcrPage] = Field(default_factory=list, max_length=MAX_UNITS)
 
 class ExtractionResult(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -67,7 +81,12 @@ class ExtractionResult(BaseModel):
             if (self.quality.total_units != self.unit_count
                 or self.quality.text_units != text_units
                 or len(set(positions)) != len(positions)
-                or any(not 1 <= position <= self.unit_count for position in positions)):
+                or len(set(self.quality.ocr_units)) != len(self.quality.ocr_units)
+                or len(set(self.quality.ocr_candidate_units)) != len(self.quality.ocr_candidate_units)
+                or len({page.position for page in self.quality.ocr_pages}) != len(self.quality.ocr_pages)
+                or any(not 1 <= position <= self.unit_count
+                       for position in positions + self.quality.ocr_units + self.quality.ocr_candidate_units
+                       + [page.position for page in self.quality.ocr_pages])):
                 raise ValueError("Invalid extraction quality positions")
             if self.status == "PARTIAL" and not self.quality.ocr_suspected_units:
                 raise ValueError("Partial extraction requires OCR-suspected units")

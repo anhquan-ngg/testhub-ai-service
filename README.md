@@ -10,7 +10,7 @@ This is a standalone Python repository, not a Python worker inside the NestJS ap
 
 - Generate Vietnamese `SINGLE_CHOICE` and `MULTIPLE_CHOICE` questions with ordered cognitive-level slots and four distinct options.
 - Select Gemini or an OpenAI-compatible 9Router generation adapter; optionally fall back from 9Router to Gemini for eligible availability failures only.
-- Extract PDF pages and PPTX slides/optional notes with original positions, hashes, text offsets, and per-unit diagnostics. No OCR engine is included.
+- Extract PDF pages and PPTX slides/optional notes with original positions, hashes, text offsets, and per-unit diagnostics. Explicit, plan-targeted supplemental vision OCR is optional; ordinary extraction never calls it.
 - Index and retrieve owner-scoped document chunks using Google embeddings and PostgreSQL/pgvector.
 - Propose source-wide knowledge outlines for backend-owned plans and generate against frozen plan slots, source units, and objectives.
 - Validate citations, counts, answers, and complete-batch output. Valid evidence refusals return a distinct domain error rather than partial questions.
@@ -107,6 +107,14 @@ Copy the tracked [.env.example](.env.example) without overwriting an existing lo
 | `EMBEDDING_MAX_BACKOFF_MS` | `8000` | `0..30000`; a server `Retry-After`/`RetryInfo` longer than this fails fast with `RAG_EMBEDDING_RATE_LIMITED`. |
 | `EMBEDDING_RETRY_BUDGET_MS` | `15000` | `0..30000`; total wait (limiter + backoff) per embedding call, kept below the 40 s RAG deadline. |
 | `EMBEDDING_CACHE_SIZE` | `2048` | `0..100000`; in-memory LRU of vectors keyed by model/dimensions/task/text hash; `0` disables. |
+| `EMBEDDING_GOOGLE_API_KEY` | empty | Dedicated key for embeddings, ideally from a separate Google Cloud project; falls back to `GEMINI_API_KEY`. Quota is per project, so this isolates indexing from question generation (it is not a way to bypass quota). |
+| `EMBEDDING_INDEXING_RPM_PERCENT` | `50` | `1..100`; share of `EMBEDDING_MAX_RPM` indexing may use so retrieval/generation requests always fit. `100` disables the cap. Indexing also pauses 250 ms while a retrieval call is in flight, and over-budget indexing returns retryable `RAG_EMBEDDING_RATE_LIMITED`, which the backend queue retries. |
+| `EMBEDDING_INDEXING_MAX_CONCURRENCY` | `1` | `1..16`; concurrent indexing embedding calls per process; retrieval is not limited by it. |
+| `EMBEDDING_PERSISTENT_CACHE_ENABLED` | `false` | Store query embeddings (sha256 key + vector only, never text) in `rag.embedding_cache`; needs migration `003`. Fails open on any database error. |
+| `EMBEDDING_PERSISTENT_CACHE_TTL_DAYS` | `30` | `1..365`; age after which a cached query vector is ignored. |
+| `EMBEDDING_DAILY_LIMIT` | `0` | `0` disables. Local per-process daily item guard; use `floor(project RPD / replicas)` (free tier: 1000). Resets at midnight Pacific (assumed) and on restart. At the limit calls fail early with non-retryable `RAG_EMBEDDING_QUOTA_EXHAUSTED`. |
+| `EMBEDDING_DAILY_WARN_PERCENT` | `80` | `1..100`; logs `embedding_daily_budget_warning` once per day. |
+| `EMBEDDING_DAILY_INDEXING_PERCENT` | `80` | `1..100`; indexing is rejected above this share of the daily limit so queries keep headroom. |
 
 The example file supplies illustrative `http://127.0.0.1:20128/v1` and PostgreSQL URLs; these are not code defaults or proof that those services exist. Blank token/router settings and placeholder Google credentials must be configured before use.
 
@@ -161,6 +169,8 @@ psql -h 127.0.0.1 -U postgres -d testhub -v ON_ERROR_STOP=1 -f migrations\000_bo
 psql -h 127.0.0.1 -U postgres -d testhub -c '\password testhub_ai'
 psql -h 127.0.0.1 -U testhub_ai -d testhub -v ON_ERROR_STOP=1 -f migrations\001_rag.sql
 psql -h 127.0.0.1 -U testhub_ai -d testhub -v ON_ERROR_STOP=1 -f migrations\002_optional_document_chapter.sql
+# Optional: durable query-embedding cache (only with EMBEDDING_PERSISTENT_CACHE_ENABLED=true)
+psql -h 127.0.0.1 -U testhub_ai -d testhub -v ON_ERROR_STOP=1 -f migrations\003_embedding_cache.sql
 ```
 
 Migrations are manual, not startup tasks, and separate from NestJS Prisma migrations. Readiness requires both migration versions and nullable `chapter_id` for topic-owned documents. The AI role owns only technical `rag` data; do not grant it business-table access. The profile endpoint alone does not verify the database schema.
@@ -231,7 +241,23 @@ Original 1-based `PAGE`/`SLIDE`/`NOTES` positions and offsets are preserved. OCR
 
 Both `EXTRACTED` and `PARTIAL` require at least one nonblank text span, including legacy payloads without `quality`. When supplied, `quality.text_units` equals the number of nonblank `PAGE`/`SLIDE` spans, excludes `NOTES`, and may overlap `ocr_suspected_units` for pages/slides containing both text and images.
 
-Usefulness and OCR classification discount entire contiguous boundary blocks of short lines (at most 100 normalized characters) appearing in at least two and at least half of nonempty base units. Repeated interior lines remain body content and count toward usefulness; a short body repeated at the boundary is conservatively treated as a margin. Margin-only sources return `OCR_REQUIRED` and cannot be chunked, even without images (`NO_USABLE_TEXT`). Partial eligibility requires at least 200 non-whitespace characters across two useful base units, or one for a two-unit document. These checks do not modify original spans: accepted sources retain their text, including margins, and exact offsets in chunks. Extraction success/consent is separate from an index becoming `READY`; no OCR recognition is performed.
+Usefulness and OCR classification discount entire contiguous boundary blocks of short lines (at most 100 normalized characters) appearing in at least two and at least half of nonempty base units. Repeated interior lines remain body content and count toward usefulness; a short body repeated at the boundary is conservatively treated as a margin. Margin-only sources return `OCR_REQUIRED` and cannot be chunked, even without images (`NO_USABLE_TEXT`). Partial eligibility requires at least 200 non-whitespace characters across two useful base units, or one for a two-unit document. These checks do not modify original spans: accepted sources retain their text, including margins, and exact offsets in chunks. Extraction success/consent is separate from an index becoming `READY`; ordinary extraction performs no OCR recognition.
+
+### Explicit Supplemental OCR And Evidence Preflight
+
+The backend owner action `POST /question-generation-plans/:id/ocr` creates a new derived version of the exact pinned document. It chooses the stored plan's source pages, not arbitrary browser input. The background worker sends `ocr_mode=targeted&ocr_positions=1,2,...` to `/internal/documents/extract` in bounded deliveries (at most 30 targets); normal extraction uses `ocr_mode=off`. No paid OCR runs merely because a plan is viewed or approved. Only faithful transcription is merged; diagram interpretation is not accepted as quoted evidence.
+
+`quality.ocr_candidate_units` includes all detected thin image-bearing pages, not just the global 30 thinnest. `quality.ocr_pages` records `PENDING`, `COMPLETED`, `NO_TEXT`, `FAILED`, `BUDGET_EXHAUSTED`, or `DISABLED`, with an optional/nullable reason. `ocr_units` lists pages with additional text actually merged, not all completed attempts. `COMPLETED/NO_ADDITIONAL_TEXT` means the provider repeated existing content; `NO_TEXT` means the images yielded none. `EXTRACTED` alone still does not certify full image coverage. Backend checkpoints preserve successful pages between deliveries; failed/disabled/time/daily-budget outcomes stop visibly instead of unlimited automatic retries.
+
+Operator setup (manual; do not apply to a shared/live database without review):
+
+1. Apply the backend's additive `20261125120000_document_plan_ocr` Prisma migration using its documented deployment process (`npx prisma migrate deploy`, after reviewing all pending migrations). Apply AI `migrations/004_ocr_page_cache.sql` to the AI pgvector database if persistent OCR cache is enabled; existing embedding migration 003 is unrelated to this change.
+2. Configure `OCR_ENABLED=true`, `OCR_MODEL` with a tested vision-capable 9router model, and the existing router connection credentials. Set `OCR_PERSISTENT_CACHE_ENABLED=true` only after migration 004. Never copy real credentials into source or logs.
+3. Review `OCR_MAX_PAGES` (delivery cap, default 30), `OCR_MAX_CONCURRENCY` (3), `OCR_MAX_ATTEMPTS` (2), `OCR_TIMEOUT_MS` (30000), `OCR_TIME_BUDGET_MS` (35000), and `OCR_DAILY_PAGE_LIMIT` (0 means unlimited; choose a nonzero budget). These limits/budgets are local to one AI process, not distributed across replicas. Set `OCR_CONFIG_VERSION` when transcription settings change to invalidate cached results. Cache hashes include image bytes, model, prompt and config versions; retries reuse successful image transcriptions. Configured cache read failure prevents paid calls; cache write failure leaves the successful backend checkpoint usable.
+4. Install the existing requirements in both development and production environments (`tzdata` is included), deliberately restart/reload the services/workers, then request supplemental OCR from the teacher's plan UI. No real OCR or migrations are performed by offline tests.
+5. Inspect page outcomes, resolve failures/budget/configuration issues if needed, then explicitly create a new plan against the derived version. Extraction and indexing precede that new plan. Old failed batches and their evidence remain immutable; they are never automatically revived.
+
+The local `/internal/rag/evidence-check` uses no generation or embedding call. It requires every selected source unit, detects unresolved selected OCR, deduplicates factual statements, rejects heading/TOC-only text and checks increasing depth for cognition and multi-answer questions. It returns `OK`, `THIN_TEXT`, `NO_TEXT`, `TITLE_ONLY`, `OCR_INCOMPLETE`, `INSUFFICIENT_DEPTH`, or `SOURCE_MISSING`, with `body_chars`, `unit_count`, `substantive_chars`, and `fact_count`. Backend approval rejects every non-OK row and fails closed when the checker is unavailable or malformed. This conservative local heuristic is not a semantic guarantee: a grounded generation request can still refuse insufficient evidence.
 
 ### RAG and generation contracts
 
@@ -324,7 +350,7 @@ Inside a container, `127.0.0.1` refers to the container, not host PostgreSQL or 
 | HTTP 502 / invalid structured output | Check model JSON/schema support, output-token budget, counts, answer flags, and citation validity. Switching response format does not disable validation. |
 | `RAG_EMBEDDING_RATE_LIMITED` / `RAG_EMBEDDING_QUOTA_EXHAUSTED` | Google embedding quota is per project across all keys and processes. Check `embedding_call`/`embedding_retry` logs and AI Studio usage; lower `EMBEDDING_MAX_RPM` to the real tier or per replica. Daily quota resets at midnight Pacific; do not rotate keys to bypass it. |
 | HTTP 504 or rate-limited Codex account | Inspect nested deadlines and 9Router account/combo routing. AI cannot select a healthy individual account. Timeouts do not trigger Gemini fallback; fix routing or tune bounded budgets deliberately. |
-| `OCR_REQUIRED` despite some extracted text | Inspect per-unit diagnostics and usefulness rather than the text-presence ratio alone. `PARTIAL` requires explicit consent; blank/header-only content is not automatically usable. No OCR engine runs here. |
+| `OCR_REQUIRED` despite some extracted text | Inspect per-unit diagnostics and usefulness rather than the text-presence ratio alone. `PARTIAL` requires explicit consent; blank/header-only content is not automatically usable. Supplemental OCR requires an explicit targeted request and a configured vision model. |
 | Windows extraction/indexing problems | Parser code supports Proactor subprocesses and a threaded fallback on Selector loops; RAG storage owns a selector-loop thread. Confirm Python 3.12, restart after configuration changes, and inspect sanitized logs. |
 | Host setup works but a container fails | Replace container-local loopback addresses with reachable database/router addresses and check networking/secrets. |
 

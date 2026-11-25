@@ -164,3 +164,35 @@ def test_fixture_outline_endpoint_returns_only_the_requested_ready_index():
         assert result["document_id"] == str(request.scope.document_id)
         assert result["version_id"] == str(request.scope.version_id)
         assert result["source_sha256"] == "a" * 64
+
+
+def scope_of(result, name_part):
+    node = next(n for n in result.nodes if name_part in n.name)
+    return {u.position for u in node.source_units}
+
+def pages_chunks(pages):
+    return [source_chunk(text, position=position) for position, text in pages.items()]
+
+LONG = "Nội dung chi tiết về dịch vụ web và cách thức triển khai trong thực tế. " * 4
+
+def test_agenda_heading_expands_to_following_content_pages():
+    chunks = pages_chunks({
+        1: "3.2. Xây dựng Web API\n3.2.1. Công nghệ .Net Core\n3.2.2. Công nghệ NodeJS",
+        2: "3.2.1. Xây dựng Web API với .NET Core\n" + LONG,
+        3: LONG, 4: "3.2.2. Công nghệ NodeJS\n" + LONG})
+    result = content_map(uuid4(), "Doc", chunks)
+    assert {1, 2, 3} <= scope_of(result, "Công nghệ .Net Core")
+    assert 4 not in scope_of(result, "Công nghệ .Net Core")
+    assert "TOC_SCOPE_EXPANDED" in result.warnings
+
+def test_title_only_slide_borrows_nearest_substantive_page():
+    chunks = pages_chunks({1: "Tổng quan điểm yếu IoT\n" + LONG, 2: "1. Giao diện quản trị không an toàn", 3: "2. Mật khẩu yếu"})
+    result = content_map(uuid4(), "Doc", chunks)
+    assert 1 in scope_of(result, "Giao diện quản trị")
+    assert 1 in scope_of(result, "Mật khẩu yếu")
+
+def test_substantive_heading_is_not_expanded():
+    chunks = pages_chunks({1: "1. Giới thiệu\n" + LONG, 2: "2. Kết luận\n" + LONG})
+    result = content_map(uuid4(), "Doc", chunks)
+    assert scope_of(result, "Giới thiệu") == {1}
+    assert "TOC_SCOPE_EXPANDED" not in result.warnings
